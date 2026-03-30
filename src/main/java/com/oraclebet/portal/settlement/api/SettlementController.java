@@ -4,8 +4,8 @@ import com.oraclebet.accountengine.api.AccountEngineUserApi;
 import com.oraclebet.support.apikit.ApiResponse;
 import com.oraclebet.support.apikit.ApiResponseFactory;
 import java.util.Map;
-import com.oraclebet.discovery.model.DiscoveryNodeType;
-import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
+import com.oraclebet.catalog.api.ProductCatalogApi;
+import com.oraclebet.catalog.dto.ProductRootDto;
 import com.oraclebet.portal.settlement.dto.PrepareSettleMarketRequest;
 import com.oraclebet.portal.settlement.dto.ProductErrorCodes;
 import com.oraclebet.portal.settlement.dto.SettleMarketRequest;
@@ -33,14 +33,14 @@ public class SettlementController {
     private final EventSettlementService settlementService;
     private final AccountEngineUserApi accountEngineUserApi;
     private final ApiResponseFactory apiResponseFactory;
-    private final NodeRpcClient nodeRpcClient;
+    private final ProductCatalogApi productCatalogApi;
     private final ObjectMapper objectMapper;
 
     @PostMapping("/prepare-settle")
     public ApiResponse<Object> prepareSettle(HttpServletRequest baseReq,
                                              @RequestBody @Valid PrepareSettleMarketRequest req) {
 
-        Map product = nodeRpcClient.get(DiscoveryNodeType.MATCH_ENGINE, "/rpc/product/by-event?eventId=" + req.getEventId(), Map.class);
+        ProductRootDto product = productCatalogApi.findProductRootById(req.getEventId()).orElse(null);
         if (product == null) {
             return apiResponseFactory.fail(
                     baseReq,
@@ -53,7 +53,7 @@ public class SettlementController {
         }
 
         // 已经结算过，不能再 prepare
-        if (((Number) product.get("statusId")).intValue() == 6) {
+        if ("SETTLED".equals(product.getStatus())) {
             return apiResponseFactory.fail(
                     baseReq,
                     HttpStatus.CONFLICT,
@@ -61,15 +61,15 @@ public class SettlementController {
                     "product already settled",
                     false,
                     Map.of(
-                            "productId", product.get("id"),
+                            "productId", product.getId(),
                             "eventId", req.getEventId(),
-                            "statusId", ((Number) product.get("statusId")).intValue()
+                            "status", product.getStatus()
                     )
             );
         }
 
         // 只有 OPEN 状态才能进入 prepare
-        if (((Number) product.get("statusId")).intValue() != 2) {
+        if (!"OPEN".equals(product.getStatus())) {
             return apiResponseFactory.fail(
                     baseReq,
                     HttpStatus.CONFLICT,
@@ -77,22 +77,22 @@ public class SettlementController {
                     "product status not allowed for prepare-settle",
                     false,
                     Map.of(
-                            "productId", product.get("id"),
+                            "productId", product.getId(),
                             "eventId", req.getEventId(),
-                            "statusId", ((Number) product.get("statusId")).intValue()
+                            "status", product.getStatus()
                     )
             );
         }
 
         // ⭐ 核心：改为“预备结算态”
         
-        nodeRpcClient.post(DiscoveryNodeType.MATCH_ENGINE, "/rpc/product/update-status", Map.of("eventId", req.getEventId(), "statusId", 8), Map.class);
+        productCatalogApi.updateProductRootStatus(req.getEventId(), "PREPARING_SETTLEMENT");
 
         return apiResponseFactory.ok(baseReq, Map.of(
                 "status", "PREPARED",
                 "eventId", req.getEventId(),
                 "marketId", req.getMarketId(),
-                "productStatusId", ((Number) product.get("statusId")).intValue()
+                "productStatus", product.getStatus()
         ));
     }
 
@@ -116,8 +116,8 @@ public class SettlementController {
         long start = System.currentTimeMillis();
 
 
-        Map product = nodeRpcClient.get(DiscoveryNodeType.MATCH_ENGINE, "/rpc/product/by-event?eventId=" + req.getEventId(), Map.class);
-        if (((Number) product.get("statusId")).intValue() == 6) {
+        ProductRootDto product = productCatalogApi.findProductRootById(req.getEventId()).orElse(null);
+        if ("SETTLED".equals(product.getStatus())) {
             return apiResponseFactory.fail(
                     baseReq,
                     HttpStatus.BAD_REQUEST,
@@ -125,9 +125,9 @@ public class SettlementController {
                     "product is closed",
                     false,
                     Map.of(
-                            "productId", product.get("id"),
+                            "productId", product.getId(),
                             "eventId", req.getEventId(),
-                            "statusId", ((Number) product.get("statusId")).intValue()
+                            "status", product.getStatus()
                     )
             );
         }
@@ -158,7 +158,7 @@ public class SettlementController {
 
 
         
-        nodeRpcClient.post(DiscoveryNodeType.MATCH_ENGINE, "/rpc/product/update-status", Map.of("eventId", req.getEventId(), "statusId", 6), Map.class);
+        productCatalogApi.updateProductRootStatus(req.getEventId(), "SETTLED");
 
         log.info("[API][SETTLE] start eventId={}, marketId={}, winner={}, batchId={}, currency={}, accountType={}",
                 req.getEventId(), req.getMarketId(), req.getWinnerSelectionId(),
