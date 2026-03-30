@@ -1,0 +1,79 @@
+package com.oraclebet.portal.settlement.service;
+
+import com.oraclebet.discovery.model.DiscoveryNodeType;
+import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/**
+ * Ledger 操作门面（通过 NodeRpcClient 调 AccountEngine /api/admin/ledger/apply）。
+ * 结算操作走管理接口（带 Redis 同步）。
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class LedgerFacadeImpl implements LedgerFacade {
+
+    private final NodeRpcClient nodeRpcClient;
+
+    @Override
+    public void credit(String userId, String currency, String accountType,
+                       BigDecimal amount, String refKey, String idemKey, String reason) {
+        Map<String, Object> cmd = buildCmd("CREDIT", userId, currency, accountType, amount, idemKey, refKey, reason, Map.of());
+        Map result = callLedger(cmd);
+        if (!Boolean.TRUE.equals(result.get("success"))) {
+            throw new IllegalStateException("credit failed: " + result.get("code") + " " + result.get("message"));
+        }
+        log.info("LEDGER_CREDIT user={} {} {} amount={} idemKey={} success=true", userId, currency, accountType, amount, idemKey);
+    }
+
+    @Override
+    public String reserve(String userId, String currency, String accountType,
+                          BigDecimal amount, String refKey, String reason) {
+        String idemKey = "Settle:" + refKey;
+        Map<String, Object> cmd = buildCmd("RESERVE", userId, currency, accountType, amount, idemKey, refKey, reason, Map.of());
+        Map result = callLedger(cmd);
+        if (!Boolean.TRUE.equals(result.get("success"))) {
+            throw new IllegalStateException("reserve failed: " + result.get("code") + " " + result.get("message"));
+        }
+        log.info("LEDGER_RESERVE user={} {} {} amount={} idemKey={} success=true", userId, currency, accountType, amount, idemKey);
+        return refKey;
+    }
+
+    @Override
+    public void commit(String userId, String reservationId, BigDecimal amount, String idemKey, String reason) {
+        Map<String, Object> cmd = buildCmd("COMMIT", userId, "USDT", "CASH", amount, idemKey, reservationId, reason,
+                Map.of("reservationId", reservationId));
+        Map result = callLedger(cmd);
+        if (!Boolean.TRUE.equals(result.get("success"))) {
+            throw new IllegalStateException("commit failed: " + result.get("code") + " " + result.get("message"));
+        }
+        log.info("LEDGER_COMMIT rsvId={} amount={} idemKey={} success=true", reservationId, amount, idemKey);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map callLedger(Map<String, Object> cmd) {
+        return nodeRpcClient.post(DiscoveryNodeType.ACCOUNT_ENGINE, "/api/admin/ledger/apply", cmd, Map.class);
+    }
+
+    private Map<String, Object> buildCmd(String type, String userId, String currency, String accountType,
+                                          BigDecimal amount, String idemKey, String refId, String reason,
+                                          Map<String, Object> attrs) {
+        Map<String, Object> cmd = new LinkedHashMap<>();
+        cmd.put("type", type);
+        cmd.put("userId", userId);
+        cmd.put("currency", currency);
+        cmd.put("accountType", accountType);
+        cmd.put("amount", amount);
+        cmd.put("idemKey", idemKey);
+        cmd.put("refId", refId);
+        cmd.put("reason", reason);
+        cmd.put("attributes", attrs);
+        return cmd;
+    }
+}

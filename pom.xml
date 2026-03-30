@@ -73,6 +73,29 @@
             <version>${project.version}</version>
         </dependency>
 
+        <!-- 公共库 -->
+        <dependency>
+            <groupId>com.x-bet</groupId>
+            <artifactId>oraclebet-shared</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.x-bet</groupId>
+            <artifactId>oraclebet-contracts</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- PostgreSQL + JPA（连 exchange_db，结算表） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- JSON -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
