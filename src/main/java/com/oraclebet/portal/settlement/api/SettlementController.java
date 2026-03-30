@@ -16,9 +16,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RTopic;
-import org.redisson.api.RedissonClient;
-import org.redisson.client.codec.StringCodec;
 import org.springframework.http.HttpStatus;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
@@ -37,7 +34,6 @@ public class SettlementController {
     private final AccountEngineUserApi accountEngineUserApi;
     private final ApiResponseFactory apiResponseFactory;
     private final NodeRpcClient nodeRpcClient;
-    private final RedissonClient redissonClient;
     private final ObjectMapper objectMapper;
 
     @PostMapping("/prepare-settle")
@@ -65,7 +61,7 @@ public class SettlementController {
                     "product already settled",
                     false,
                     Map.of(
-                            "productId", product.getId(),
+                            "productId", product.get("id"),
                             "eventId", req.getEventId(),
                             "statusId", ((Number) product.get("statusId")).intValue()
                     )
@@ -81,7 +77,7 @@ public class SettlementController {
                     "product status not allowed for prepare-settle",
                     false,
                     Map.of(
-                            "productId", product.getId(),
+                            "productId", product.get("id"),
                             "eventId", req.getEventId(),
                             "statusId", ((Number) product.get("statusId")).intValue()
                     )
@@ -129,7 +125,7 @@ public class SettlementController {
                     "product is closed",
                     false,
                     Map.of(
-                            "productId", product.getId(),
+                            "productId", product.get("id"),
                             "eventId", req.getEventId(),
                             "statusId", ((Number) product.get("statusId")).intValue()
                     )
@@ -137,7 +133,6 @@ public class SettlementController {
         }
 
 
-//        RTopic topicOjb = redissonClient.getTopic("ws:system:message::set", StringCodec.INSTANCE);
 
 //        // 构造 SETTLING 状态消息
 //        SettlementStatusMessage msg =
