@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oraclebet.accountengine.api.*;
 import com.oraclebet.accountengine.api.dto.*;
+import com.oraclebet.web.model.PagedList;
 import com.oraclebet.discovery.model.DiscoveryNodeType;
 import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
 import org.springframework.context.annotation.Bean;
@@ -130,6 +131,18 @@ public class AccountEngineRpcAdapters {
                     return Optional.empty();
                 }
             }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public Map<String, String> findUserIdsByEmails(List<String> emails) {
+                try {
+                    Map result = rpc.post(DiscoveryNodeType.ACCOUNT_ENGINE,
+                            "/api/account/users/by-emails", emails, Map.class);
+                    return result != null ? result : Map.of();
+                } catch (Exception e) {
+                    return Map.of();
+                }
+            }
         };
     }
 
@@ -137,5 +150,27 @@ public class AccountEngineRpcAdapters {
     public AccountEngineLedgerCommandApi accountEngineLedgerCommandApi(NodeRpcClient rpc) {
         return command -> rpc.post(DiscoveryNodeType.ACCOUNT_ENGINE,
                 "/api/admin/ledger/apply", command, AccountEngineLedgerResultDto.class);
+    }
+
+    @Bean
+    public AccountEngineOrderQueryApi accountEngineOrderQueryApi(NodeRpcClient rpc, ObjectMapper mapper) {
+        return (userId, eventId, marketId, selectionId, status, page, pageSize) -> {
+            StringBuilder sb = new StringBuilder("/api/account/orders?");
+            if (userId != null && !userId.isBlank()) sb.append("userId=").append(userId).append("&");
+            if (eventId != null && !eventId.isBlank()) sb.append("eventId=").append(eventId).append("&");
+            if (marketId != null && !marketId.isBlank()) sb.append("marketId=").append(marketId).append("&");
+            if (selectionId != null && !selectionId.isBlank()) sb.append("selectionId=").append(selectionId).append("&");
+            if (status != null && !status.isBlank()) sb.append("status=").append(status).append("&");
+            if (page != null) sb.append("page=").append(page).append("&");
+            if (pageSize != null) sb.append("pageSize=").append(pageSize).append("&");
+            String url = sb.toString().replaceAll("&$", "");
+            Map result = rpc.get(DiscoveryNodeType.ACCOUNT_ENGINE, url, Map.class);
+            if (result == null) return new PagedList<>(List.of(), 0);
+            List<OrderDto> items = ((List<?>) result.getOrDefault("items", List.of())).stream()
+                    .map(o -> mapper.convertValue(o, OrderDto.class))
+                    .toList();
+            int count = result.containsKey("count") ? ((Number) result.get("count")).intValue() : items.size();
+            return new PagedList<>(items, count);
+        };
     }
 }

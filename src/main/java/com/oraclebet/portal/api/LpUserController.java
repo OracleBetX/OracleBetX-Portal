@@ -14,10 +14,11 @@ import java.util.Map;
  * LP 用户管理接口。
  *
  * <pre>
- * POST /api/lp/user/create?eventId=xxx&marketId=1  — 创建 LP 机器人用户
- * GET  /api/lp/user/check?eventId=xxx&marketId=1   — 检查 LP 用户是否存在
+ * POST /api/lp/user/create?eventId=xxx&marketId=1&outcomeId=1  — 创建 LP 机器人用户
+ * GET  /api/lp/user/check?eventId=xxx&marketId=1&outcomeId=1   — 检查 LP 用户是否存在
  * </pre>
  *
+ * 邮箱格式：{eventId}_{marketId}_{outcomeId}_bot@xbet.com
  * 通过 RPC 调 Auth 服务注册用户。
  */
 @RestController
@@ -34,11 +35,13 @@ public class LpUserController {
 
     @PostMapping("/user/create")
     public ResponseEntity<Map> createLpUser(@RequestParam String eventId,
-                                             @RequestParam String marketId) {
-        String email = lpEmail(eventId, marketId);
+                                             @RequestParam String marketId,
+                                             @RequestParam(defaultValue = "") String outcomeId) {
+        String email = lpEmail(eventId, marketId, outcomeId);
         String password = "123456";
 
-        log.info("[lp-user] 创建 LP 用户 eventId={} marketId={} email={}", eventId, marketId, email);
+        log.info("[lp-user] 创建 LP 用户 eventId={} marketId={} outcomeId={} email={}",
+                eventId, marketId, outcomeId, email);
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("email", email);
@@ -52,8 +55,9 @@ public class LpUserController {
 
     @GetMapping("/user/check")
     public ResponseEntity<Map> checkLpUser(@RequestParam String eventId,
-                                            @RequestParam String marketId) {
-        String email = lpEmail(eventId, marketId);
+                                            @RequestParam String marketId,
+                                            @RequestParam(defaultValue = "") String outcomeId) {
+        String email = lpEmail(eventId, marketId, outcomeId);
 
         Map result = nodeRpcClient.get(DiscoveryNodeType.AUTH_NODE,
                 "/api/users/self?email=" + email, Map.class);
@@ -61,8 +65,12 @@ public class LpUserController {
         return ResponseEntity.ok(result);
     }
 
-    private String lpEmail(String eventId, String marketId) {
-        return safeToken(eventId) + "_" + safeToken(marketId) + "_bot@xbet.com";
+    private String lpEmail(String eventId, String marketId, String outcomeId) {
+        String base = safeToken(eventId) + "_" + safeToken(marketId);
+        if (outcomeId != null && !outcomeId.isBlank()) {
+            base += "_" + safeToken(outcomeId);
+        }
+        return base + "_bot@xbet.com";
     }
 
     private String safeToken(String s) {
