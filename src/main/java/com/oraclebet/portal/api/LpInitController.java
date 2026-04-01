@@ -1,23 +1,20 @@
 package com.oraclebet.portal.api;
 
-import com.oraclebet.discovery.model.DiscoveryNodeType;
-import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
+import com.oraclebet.portal.lp.dto.LpInitRequest;
+import com.oraclebet.portal.lp.dto.LpInitResponse;
+import com.oraclebet.portal.lp.entity.LpInitStateEntity;
+import com.oraclebet.portal.lp.service.LpInitService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.Map;
-
 /**
- * LP 初始化接口（代理到 MatchEngine）。
+ * LP 初始化接口。
  *
  * <pre>
- * POST /api/lp/init — LP 初始化（冻结资金 + 创建仓位）
+ * POST /api/lp/init — LP 初始化（注资 + 冻结 + 扣款）
  * </pre>
- *
- * <p>实际逻辑在 MatchEngine 的 LpInitService 里，
- * Portal 只做请求转发，保证事务完整性由 MatchEngine 保证。
  */
 @RestController
 @RequestMapping("/api/lp")
@@ -25,24 +22,28 @@ public class LpInitController {
 
     private static final Logger log = LoggerFactory.getLogger(LpInitController.class);
 
-    private final NodeRpcClient nodeRpcClient;
+    private final LpInitService lpInitService;
 
-    public LpInitController(NodeRpcClient nodeRpcClient) {
-        this.nodeRpcClient = nodeRpcClient;
+    public LpInitController(LpInitService lpInitService) {
+        this.lpInitService = lpInitService;
     }
 
-    /**
-     * LP 初始化（主队 + 客队）。
-     * 转发到 MatchEngine /api/lp/init。
-     */
     @PostMapping("/init")
-    public ResponseEntity<Map> initLp(@RequestBody Map<String, Object> request) {
-        log.info("[lp-init] 转发到 MatchEngine lpUserId={} eventId={} marketId={}",
-                request.get("lpUserId"), request.get("eventId"), request.get("marketId"));
+    public ResponseEntity<LpInitResponse> initLp(@RequestBody LpInitRequest request) {
+        log.info("[lp-init] lpUserId={} eventId={} marketId={}",
+                request.getLpUserId(), request.getEventId(), request.getMarketId());
 
-        Map result = nodeRpcClient.post(DiscoveryNodeType.MATCH_ENGINE,
-                "/api/lp/init", request, Map.class);
+        LpInitStateEntity state = lpInitService.initLp(request);
 
-        return ResponseEntity.ok(result);
+        LpInitResponse resp = new LpInitResponse(
+                request.getLpUserId(),
+                request.getEventId(),
+                request.getMarketId(),
+                state.getStatus().name(),
+                state.getReservationId(),
+                state.getMessage()
+        );
+
+        return ResponseEntity.ok(resp);
     }
 }
