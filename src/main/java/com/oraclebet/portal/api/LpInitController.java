@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -104,6 +105,30 @@ public class LpInitController {
                 .set("updatedAt", now)
                 .setOnInsert("createdAt", now);
         mongoTemplate.upsert(q, u, BOT_BINDING_COLLECTION);
+    }
+
+    /**
+     * GET /api/lp/bindings?eventId=xxx — 查看绑定数据
+     */
+    @SuppressWarnings("unchecked")
+    @GetMapping("/bindings")
+    public ResponseEntity<List<Map>> listBindings(@RequestParam String eventId) {
+        Query q = Query.query(Criteria.where("fixtureId").is(eventId));
+        List<Map> bindings = mongoTemplate.find(q, Map.class, BOT_BINDING_COLLECTION);
+        return ResponseEntity.ok(bindings);
+    }
+
+    /**
+     * POST /api/lp/fix-bindings?eventId=xxx — 单独修复绑定中缺失的 accountId
+     */
+    @PostMapping("/fix-bindings")
+    public ResponseEntity<Map<String, Object>> fixBindings(@RequestParam String eventId) {
+        log.info("[fix-bindings] eventId={}", eventId);
+        int fixed = batchInitService.fixBindingsByEventId(eventId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("eventId", eventId);
+        result.put("fixedCount", fixed);
+        return ResponseEntity.ok(result);
     }
 
     /**

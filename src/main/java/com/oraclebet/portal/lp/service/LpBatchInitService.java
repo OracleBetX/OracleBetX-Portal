@@ -135,6 +135,59 @@ public class LpBatchInitService {
     }
 
     /**
+     * 单独修复指定 eventId 下 bot_product_binding 中 accountId 为空的记录
+     */
+    public int fixBindingsByEventId(String eventId) {
+        // 1. 查出该 event 下所有 binding 的 email
+        Query q = Query.query(Criteria.where("fixtureId").is(eventId).and("status").is("ACTIVE"));
+        @SuppressWarnings("unchecked")
+        List<Map> bindings = mongoTemplate.find(q, Map.class, "bot_product_binding");
+        List<String> emails = new ArrayList<>();
+        for (Map b : bindings) {
+            String marketId = String.valueOf(b.getOrDefault("marketId", ""));
+            String selectionId = String.valueOf(b.getOrDefault("selectionId", ""));
+            emails.add(botEmail(eventId, marketId, selectionId));
+        }
+        if (emails.isEmpty()) return 0;
+        log.info("[fix-bindings] eventId={} bindings={} emails={}", eventId, bindings.size(), emails);
+
+        // 2. 批量查 userId
+        Map<String, String> emailToUserId = userApi.findUserIdsByEmails(emails);
+        log.info("[fix-bindings] emailToUserId={}", emailToUserId);
+
+        // 3. 回填
+        return doFixBindings(eventId, emailToUserId, bindings);
+    }
+
+    @SuppressWarnings("unchecked")
+    private int doFixBindings(String eventId, Map<String, String> emailToUserId, List<Map> bindings) {
+        int fixed = 0;
+        for (Map b : bindings) {
+            String accountId = String.valueOf(b.getOrDefault("accountId", ""));
+            if (!accountId.isEmpty() && !"null".equals(accountId)) continue;
+
+            String sid = String.valueOf(b.getOrDefault("sid", ""));
+            String marketId = String.valueOf(b.getOrDefault("marketId", ""));
+            String selectionId = String.valueOf(b.getOrDefault("selectionId", ""));
+            String email = botEmail(eventId, marketId, selectionId);
+            String userId = emailToUserId.get(email);
+
+            if (userId != null) {
+                mongoTemplate.updateFirst(
+                        Query.query(Criteria.where("sid").is(sid)),
+                        Update.update("accountId", userId).set("updatedAt", System.currentTimeMillis()),
+                        "bot_product_binding"
+                );
+                fixed++;
+            }
+        }
+        if (fixed > 0) {
+            log.info("[fix-bindings] fixed {} bindings accountId for eventId={}", fixed, eventId);
+        }
+        return fixed;
+    }
+
+    /**
      * 回填 bot_product_binding 中 accountId 为空的记录
      */
     @SuppressWarnings("unchecked")
