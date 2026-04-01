@@ -108,6 +108,19 @@ public class LpInitController {
     }
 
     /**
+     * POST /api/lp/fix-positions?eventId=xxx — 补充已 DONE 但缺持仓的 market
+     */
+    @PostMapping("/fix-positions")
+    public ResponseEntity<Map<String, Object>> fixPositions(@RequestParam String eventId) {
+        log.info("[fix-positions] eventId={}", eventId);
+        int fixed = batchInitService.fixPositions(eventId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("eventId", eventId);
+        result.put("fixedCount", fixed);
+        return ResponseEntity.ok(result);
+    }
+
+    /**
      * GET /api/lp/bindings?eventId=xxx — 查看绑定数据
      */
     @SuppressWarnings("unchecked")

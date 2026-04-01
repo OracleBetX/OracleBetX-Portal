@@ -147,6 +147,31 @@ public class AccountEngineRpcAdapters {
     }
 
     @Bean
+    public AccountEngineLpPositionApi accountEngineLpPositionApi(NodeRpcClient rpc) {
+        return new AccountEngineLpPositionApi() {
+            @Override
+            public void upsertInitEventAccount(AccountEngineLpEventAccountInitCommand command) {
+                rpc.post(DiscoveryNodeType.ACCOUNT_ENGINE,
+                        "/api/account/lp/event-account", command, Void.class);
+            }
+
+            @Override
+            public void saveInitLot(AccountEngineLpLotInitCommand command) {
+                rpc.post(DiscoveryNodeType.ACCOUNT_ENGINE,
+                        "/api/account/lp/lot", command, Void.class);
+            }
+
+            @Override
+            public void syncPositionToRedis(String userId, String eventId, String marketId, String selectionId) {
+                rpc.post(DiscoveryNodeType.ACCOUNT_ENGINE,
+                        "/api/account/lp/sync-redis?userId=" + userId + "&eventId=" + eventId
+                                + "&marketId=" + marketId + "&selectionId=" + selectionId,
+                        null, Void.class);
+            }
+        };
+    }
+
+    @Bean
     public AccountEngineLedgerCommandApi accountEngineLedgerCommandApi(NodeRpcClient rpc) {
         return command -> rpc.post(DiscoveryNodeType.ACCOUNT_ENGINE,
                 "/api/admin/ledger/apply", command, AccountEngineLedgerResultDto.class);

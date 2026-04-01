@@ -5,6 +5,7 @@ import com.oraclebet.portal.lp.dto.LpBatchInitRequest;
 import com.oraclebet.portal.lp.dto.LpBatchInitResponse;
 import com.oraclebet.portal.lp.dto.LpInitRequest;
 import com.oraclebet.portal.lp.entity.LpInitStateEntity;
+import com.oraclebet.portal.lp.repo.LpInitStateRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -24,13 +25,16 @@ public class LpBatchInitService {
     private final LpInitService lpInitService;
     private final MongoTemplate mongoTemplate;
     private final AccountEngineUserApi userApi;
+    private final LpInitStateRepository lpInitStateRepository;
 
     public LpBatchInitService(LpInitService lpInitService,
                               MongoTemplate mongoTemplate,
-                              AccountEngineUserApi userApi) {
+                              AccountEngineUserApi userApi,
+                              LpInitStateRepository lpInitStateRepository) {
         this.lpInitService = lpInitService;
         this.mongoTemplate = mongoTemplate;
         this.userApi = userApi;
+        this.lpInitStateRepository = lpInitStateRepository;
     }
 
     public LpBatchInitResponse batchInit(LpBatchInitRequest req) {
@@ -132,6 +136,46 @@ public class LpBatchInitService {
 
         // 一次 RPC 调用批量查
         return userApi.findUserIdsByEmails(emails);
+    }
+
+    /**
+     * 补充已 DONE 但缺持仓的 market：查 lp_init_state 中 DONE 的记录，
+     * 对每条重新调 upsertInitEventAccount + saveInitLot（幂等）
+     */
+    /**
+     * 补充已 DONE 但缺持仓的 market：
+     * 调 AccountEngine LpInventoryService.ensureInitialInventoryForUser（PG + Redis 一步到位）
+     */
+    public int fixPositions(String eventId) {
+        List<LpInitStateEntity> doneStates = lpInitStateRepository.findByEventIdAndStatus(eventId, LpInitStateEntity.Status.DONE);
+        if (doneStates.isEmpty()) return 0;
+
+        int fixed = 0;
+        for (LpInitStateEntity state : doneStates) {
+            try {
+                Query q = Query.query(Criteria.where("fixtureId").is(eventId)
+                        .and("marketId").is(state.getMarketId())
+                        .and("status").is("ACTIVE"));
+                @SuppressWarnings("unchecked")
+                List<Map> bindings = mongoTemplate.find(q, Map.class, "bot_product_binding");
+
+                for (Map b : bindings) {
+                    String selectionId = String.valueOf(b.getOrDefault("selectionId", ""));
+                    String accountId = String.valueOf(b.getOrDefault("accountId", ""));
+                    if (selectionId.isEmpty() || accountId.isEmpty() || "null".equals(accountId)) continue;
+
+                    BigDecimal qty = new BigDecimal("10000");
+                    BigDecimal price = new BigDecimal("50");
+
+                    lpInitService.initInventory(accountId, eventId, state.getMarketId(), selectionId, price, qty);
+                    fixed++;
+                }
+                log.info("[fix-positions] eventId={} marketId={} OK", eventId, state.getMarketId());
+            } catch (Exception e) {
+                log.error("[fix-positions] eventId={} marketId={} FAILED: {}", eventId, state.getMarketId(), e.getMessage());
+            }
+        }
+        return fixed;
     }
 
     /**
