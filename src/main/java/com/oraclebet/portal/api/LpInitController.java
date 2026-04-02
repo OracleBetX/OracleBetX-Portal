@@ -1,10 +1,9 @@
 package com.oraclebet.portal.api;
 
-import com.oraclebet.portal.lp.dto.LpBatchInitRequest;
-import com.oraclebet.portal.lp.dto.LpBatchInitResponse;
-import com.oraclebet.portal.lp.dto.LpInitRequest;
-import com.oraclebet.portal.lp.dto.LpInitResponse;
+import com.oraclebet.portal.lp.dto.*;
 import com.oraclebet.portal.lp.entity.LpInitStateEntity;
+import com.oraclebet.portal.lp.kafka.LpInitKafkaProducer;
+import com.oraclebet.portal.lp.repo.LpInitStateRepository;
 import com.oraclebet.portal.lp.service.LpBatchInitService;
 import com.oraclebet.portal.lp.service.LpInitService;
 import org.slf4j.Logger;
@@ -16,10 +15,10 @@ import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * LP 初始化接口。
@@ -38,13 +37,19 @@ public class LpInitController {
     private final LpInitService lpInitService;
     private final LpBatchInitService batchInitService;
     private final MongoTemplate mongoTemplate;
+    private final LpInitKafkaProducer lpInitKafkaProducer;
+    private final LpInitStateRepository lpInitStateRepository;
 
     public LpInitController(LpInitService lpInitService,
                             LpBatchInitService batchInitService,
-                            MongoTemplate mongoTemplate) {
+                            MongoTemplate mongoTemplate,
+                            LpInitKafkaProducer lpInitKafkaProducer,
+                            LpInitStateRepository lpInitStateRepository) {
         this.lpInitService = lpInitService;
         this.batchInitService = batchInitService;
         this.mongoTemplate = mongoTemplate;
+        this.lpInitKafkaProducer = lpInitKafkaProducer;
+        this.lpInitStateRepository = lpInitStateRepository;
     }
 
     @PostMapping("/init")
@@ -145,14 +150,106 @@ public class LpInitController {
     }
 
     /**
-     * POST /api/lp/init-batch — 批量初始化 LP
-     * 遍历 event 下所有 market × outcome，创建用户 + 注资 + 持仓初始化
+     * POST /api/lp/init-batch — 批量初始化 LP（同步，会超时）
      */
     @PostMapping("/init-batch")
     public ResponseEntity<LpBatchInitResponse> initBatch(@RequestBody LpBatchInitRequest request) {
         log.info("[lp-batch-init] eventId={} markets={}", request.getEventId(),
                 request.getItems() != null ? request.getItems().size() : 0);
         LpBatchInitResponse resp = batchInitService.batchInit(request);
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * POST /api/lp/initV2 — 异步批量初始化 LP（Kafka）
+     * <p>
+     * 接收 LpBatchInitRequest，拆分成每个 market 一条 Kafka 消息，立即返回。
+     * Consumer 后台处理：创建 bot 用户 → 注资 → 冻结 → 扣款 → 持仓初始化。
+     * 通过 GET /api/lp/init-status?eventId=xxx 查询进度。
+     */
+    @PostMapping("/initV2")
+    public ResponseEntity<Map<String, Object>> initV2(@RequestBody LpBatchInitRequest request) {
+        String eventId = request.getEventId();
+        List<LpBatchInitRequest.MarketInit> items = request.getItems();
+
+        if (eventId == null || eventId.isBlank() || items == null || items.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "ok", false, "message", "eventId and items required"));
+        }
+
+        log.info("[lp-initV2] eventId={} markets={}", eventId, items.size());
+
+        String traceId = UUID.randomUUID().toString();
+        BigDecimal initCash = request.getInitCash() != null ? request.getInitCash() : BigDecimal.ZERO;
+        boolean cashSent = false;
+        int sent = 0;
+
+        for (LpBatchInitRequest.MarketInit market : items) {
+            List<LpBatchInitRequest.OutcomeInit> outcomes = market.getOutcomes();
+            if (outcomes == null || outcomes.size() != 2) {
+                log.warn("[lp-initV2] skipped marketId={} (outcomes != 2)", market.getMarketId());
+                continue;
+            }
+
+            LpBatchInitRequest.OutcomeInit home = outcomes.get(0);
+            LpBatchInitRequest.OutcomeInit away = outcomes.get(1);
+
+            LpInitCommand cmd = new LpInitCommand();
+            cmd.setEventId(eventId);
+            cmd.setMarketId(market.getMarketId());
+            cmd.setHomeSelectionId(home.getSelectionId());
+            cmd.setHomePrice(home.getPrice());
+            cmd.setHomeQty(home.getQty());
+            cmd.setAwaySelectionId(away.getSelectionId());
+            cmd.setAwayPrice(away.getPrice());
+            cmd.setAwayQty(away.getQty());
+            cmd.setInitCash(!cashSent ? initCash : BigDecimal.ZERO);
+            cmd.setTraceId(traceId);
+
+            lpInitKafkaProducer.send(cmd);
+            cashSent = true;
+            sent++;
+        }
+
+        log.info("[lp-initV2] published {} messages, traceId={}", sent, traceId);
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("ok", true);
+        resp.put("status", "PROCESSING");
+        resp.put("eventId", eventId);
+        resp.put("totalMarkets", sent);
+        resp.put("traceId", traceId);
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * GET /api/lp/init-status?eventId=xxx — 查询 LP 初始化进度
+     */
+    @GetMapping("/init-status")
+    public ResponseEntity<Map<String, Object>> initStatus(@RequestParam String eventId) {
+        List<LpInitStateEntity> states = lpInitStateRepository.findByEventId(eventId);
+
+        long done = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.DONE).count();
+        long failed = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.FAILED).count();
+        long initing = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.INITING).count();
+
+        List<Map<String, Object>> details = states.stream().map(s -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("marketId", s.getMarketId());
+            m.put("lpUserId", s.getLpUserId());
+            m.put("status", s.getStatus().name());
+            m.put("message", s.getMessage());
+            m.put("updatedAt", s.getUpdatedAt().toString());
+            return m;
+        }).collect(Collectors.toList());
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("eventId", eventId);
+        resp.put("total", states.size());
+        resp.put("done", done);
+        resp.put("failed", failed);
+        resp.put("initing", initing);
+        resp.put("details", details);
         return ResponseEntity.ok(resp);
     }
 }

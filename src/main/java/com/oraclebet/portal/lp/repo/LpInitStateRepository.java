@@ -10,4 +10,6 @@ public interface LpInitStateRepository extends JpaRepository<LpInitStateEntity, 
     Optional<LpInitStateEntity> findByLpUserIdAndEventIdAndMarketId(String lpUserId, String eventId, String marketId);
 
     List<LpInitStateEntity> findByEventIdAndStatus(String eventId, LpInitStateEntity.Status status);
+
+    List<LpInitStateEntity> findByEventId(String eventId);
 }
