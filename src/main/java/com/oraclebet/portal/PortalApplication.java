@@ -11,6 +11,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @ComponentScan(basePackages = {
         "com.oraclebet.portal",
         "com.oraclebet.support.apikit",
+        "com.oraclebet.common.config.kafka",
         "com.oraclebet.common.config.mongodb",
         "com.oraclebet.discovery",
         "com.oraclebet.matchengine.marketdata.repository"
