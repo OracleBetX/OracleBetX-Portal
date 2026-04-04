@@ -15,3 +15,7 @@
 4. 回到当前工程，更新 git submodule 引用到最新提交：`cd libs/oraclebet-libs && git pull origin main`
 5. 重新编译当前工程，确保使用 submodule 版本构建成功
 6. 提交当前工程的 submodule 引用变更并 push
+
+## Java 构建环境
+构建环境规范见 /Users/tong/Documents/GitHub/OracleBetX-Projects/OracleBetx-Skill/oraclebetx-java-build/SKILL.md，所有 mvn 命令必须按照该规范执行。
+核心要点：必须使用 `SHELL=/bin/bash JAVA_HOME="/Users/tong/.sdkman/candidates/java/current" /opt/homebrew/bin/mvn` 执行 Maven 命令。
