@@ -9,7 +9,7 @@ import java.time.Instant;
 
 @Entity
 @Table(
-        name = "lp_init_state",
+        name = "lp_init_state", schema = "exchange",
         uniqueConstraints = {
                 @UniqueConstraint(name = "uk_lp_init_state", columnNames = {"lp_user_id", "event_id", "market_id"})
         }

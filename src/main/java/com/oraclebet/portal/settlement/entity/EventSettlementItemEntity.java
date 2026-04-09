@@ -9,7 +9,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 @Entity
-@Table(name = "event_settlement_item",
+@Table(name = "event_settlement_item", schema = "exchange",
         indexes = {
                 @Index(name="idx_esi_batch_user", columnList="batch_id,user_id"),
                 @Index(name="idx_esi_event_market", columnList="event_id,market_id")

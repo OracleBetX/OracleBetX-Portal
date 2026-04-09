@@ -9,7 +9,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 @Entity
-@Table(name = "event_settlement_batch")
+@Table(name = "event_settlement_batch", schema = "exchange")
 @Getter @Setter
 public class EventSettlementBatchEntity {
 

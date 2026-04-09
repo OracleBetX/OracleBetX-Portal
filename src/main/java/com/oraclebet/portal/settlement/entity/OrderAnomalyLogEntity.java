@@ -13,7 +13,7 @@ import java.util.UUID;
 @Getter
 @Setter
 @Entity
-@Table(name = "order_anomaly_log",
+@Table(name = "order_anomaly_log", schema = "exchange",
         indexes = {
                 @Index(name = "idx_oal_created_at", columnList = "created_at"),
                 @Index(name = "idx_oal_order_id", columnList = "order_id, created_at")

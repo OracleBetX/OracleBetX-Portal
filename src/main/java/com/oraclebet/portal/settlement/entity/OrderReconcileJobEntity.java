@@ -10,7 +10,7 @@ import java.util.UUID;
 @Getter
 @Setter
 @Entity
-@Table(name = "order_reconcile_job",
+@Table(name = "order_reconcile_job", schema = "exchange",
         uniqueConstraints = @UniqueConstraint(name = "uk_reconcile_idem", columnNames = "idem_key"),
         indexes = {
                 @Index(name = "idx_orj_next_run", columnList = "job_status, next_run_at"),
