@@ -22,7 +22,7 @@ import java.util.Map;
  * 通过 RPC 调 Auth 服务注册用户。
  */
 @RestController
-@RequestMapping("/api/lp")
+@RequestMapping("/admin/lp")
 public class LpUserController {
 
     private static final Logger log = LoggerFactory.getLogger(LpUserController.class);
@@ -61,6 +61,16 @@ public class LpUserController {
 
         Map result = nodeRpcClient.get(DiscoveryNodeType.AUTH_NODE,
                 "/api/users/self?email=" + email, Map.class);
+
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/user/token")
+    public ResponseEntity<Map> queryUserToken(@RequestParam String email) {
+        log.info("[lp-user] 查询用户 token email={}", email);
+
+        Map result = nodeRpcClient.get(DiscoveryNodeType.ACCOUNT_ENGINE,
+                "/api/account/users/token?email=" + email, Map.class);
 
         return ResponseEntity.ok(result);
     }
