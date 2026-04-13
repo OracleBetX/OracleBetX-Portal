@@ -1,9 +1,9 @@
 package com.oraclebet.portal.lp.kafka;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.oraclebet.accountengine.api.AccountEngineUserApi;
 import com.oraclebet.common.config.kafka.KafkaProperties;
 import com.oraclebet.common.config.kafka.TradingKafkaTopics;
+import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
 import com.oraclebet.portal.lp.service.LpInitService;
 import jakarta.annotation.PreDestroy;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -36,7 +36,7 @@ public class LpInitKafkaConfig {
     public LpInitKafkaConfig(KafkaProperties kafkaProperties,
                              TradingKafkaTopics topics,
                              ObjectMapper objectMapper,
-                             AccountEngineUserApi userApi,
+                             NodeRpcClient nodeRpcClient,
                              LpInitService lpInitService,
                              MongoTemplate mongoTemplate) {
         try {
@@ -48,7 +48,7 @@ public class LpInitKafkaConfig {
 
             this.consumerThread = new LpInitKafkaConsumer(
                     consumer, kafkaProperties, topics, decoder,
-                    userApi, lpInitService, mongoTemplate);
+                    nodeRpcClient, lpInitService, mongoTemplate);
             this.consumerThread.setName("lp-init-consumer");
             this.consumerThread.setDaemon(true);
             this.consumerThread.start();
