@@ -1,11 +1,11 @@
 package com.oraclebet.portal.api;
 
-import com.oraclebet.discovery.model.DiscoveryNodeType;
-import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
+import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.ResponseEntity;
+import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -19,7 +19,7 @@ import java.util.Map;
  * </pre>
  *
  * 邮箱格式：{eventId}_{marketId}_{outcomeId}_bot@xbet.com
- * 通过 RPC 调 Auth 服务注册用户。
+ * 通过网关转发到 Auth / AccountEngine 服务。
  */
 @RestController
 @RequestMapping("/admin/lp")
@@ -27,10 +27,13 @@ public class LpUserController {
 
     private static final Logger log = LoggerFactory.getLogger(LpUserController.class);
 
-    private final NodeRpcClient nodeRpcClient;
+    private final GatewayAddressProvider gatewayAddressProvider;
+    private final RestTemplate restTemplate;
 
-    public LpUserController(NodeRpcClient nodeRpcClient) {
-        this.nodeRpcClient = nodeRpcClient;
+    public LpUserController(GatewayAddressProvider gatewayAddressProvider,
+                            RestTemplate nodeRpcRestTemplate) {
+        this.gatewayAddressProvider = gatewayAddressProvider;
+        this.restTemplate = nodeRpcRestTemplate;
     }
 
     @PostMapping("/user/create")
@@ -47,8 +50,10 @@ public class LpUserController {
         body.put("email", email);
         body.put("password", password);
 
-        Map result = nodeRpcClient.post(DiscoveryNodeType.AUTH_NODE,
-                "/api/users", body, Map.class);
+        String url = gatewayAddressProvider.getGatewayUrl() + "/api/users";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        Map result = restTemplate.exchange(url, HttpMethod.POST, new HttpEntity<>(body, headers), Map.class).getBody();
 
         return ResponseEntity.ok(result);
     }
@@ -59,8 +64,8 @@ public class LpUserController {
                                             @RequestParam(defaultValue = "") String outcomeId) {
         String email = lpEmail(eventId, marketId, outcomeId);
 
-        Map result = nodeRpcClient.get(DiscoveryNodeType.AUTH_NODE,
-                "/api/users/self?email=" + email, Map.class);
+        String url = gatewayAddressProvider.getGatewayUrl() + "/api/users/self?email=" + email;
+        Map result = restTemplate.getForObject(url, Map.class);
 
         return ResponseEntity.ok(result);
     }
@@ -69,8 +74,8 @@ public class LpUserController {
     public ResponseEntity<Map> queryUserToken(@RequestParam String email) {
         log.info("[lp-user] 查询用户 token email={}", email);
 
-        Map result = nodeRpcClient.get(DiscoveryNodeType.ACCOUNT_ENGINE,
-                "/api/account/users/token?email=" + email, Map.class);
+        String url = gatewayAddressProvider.getGatewayUrl() + "/api/account/users/token?email=" + email;
+        Map result = restTemplate.getForObject(url, Map.class);
 
         return ResponseEntity.ok(result);
     }

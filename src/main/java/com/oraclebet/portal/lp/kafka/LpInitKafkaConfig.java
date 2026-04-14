@@ -3,8 +3,7 @@ package com.oraclebet.portal.lp.kafka;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oraclebet.common.config.kafka.KafkaProperties;
 import com.oraclebet.common.config.kafka.TradingKafkaTopics;
-import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
-import com.oraclebet.portal.lp.service.LpInitService;
+import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
 import jakarta.annotation.PreDestroy;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -15,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.Properties;
 
@@ -36,8 +36,8 @@ public class LpInitKafkaConfig {
     public LpInitKafkaConfig(KafkaProperties kafkaProperties,
                              TradingKafkaTopics topics,
                              ObjectMapper objectMapper,
-                             NodeRpcClient nodeRpcClient,
-                             LpInitService lpInitService,
+                             GatewayAddressProvider gatewayAddressProvider,
+                             RestTemplate nodeRpcRestTemplate,
                              MongoTemplate mongoTemplate) {
         try {
             KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(
@@ -48,7 +48,7 @@ public class LpInitKafkaConfig {
 
             this.consumerThread = new LpInitKafkaConsumer(
                     consumer, kafkaProperties, topics, decoder,
-                    nodeRpcClient, lpInitService, mongoTemplate);
+                    gatewayAddressProvider, nodeRpcRestTemplate, mongoTemplate);
             this.consumerThread.setName("lp-init-consumer");
             this.consumerThread.setDaemon(true);
             this.consumerThread.start();

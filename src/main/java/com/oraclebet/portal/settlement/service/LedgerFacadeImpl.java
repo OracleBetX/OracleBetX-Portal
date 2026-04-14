@@ -1,17 +1,18 @@
 package com.oraclebet.portal.settlement.service;
 
-import com.oraclebet.discovery.model.DiscoveryNodeType;
-import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
+import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Ledger 操作门面（通过 NodeRpcClient 调 AccountEngine /api/admin/ledger/apply）。
+ * Ledger 操作门面（通过网关调 AccountEngine /api/admin/ledger/apply）。
  * 结算操作走管理接口（带 Redis 同步）。
  */
 @Service
@@ -19,7 +20,8 @@ import java.util.Map;
 @Slf4j
 public class LedgerFacadeImpl implements LedgerFacade {
 
-    private final NodeRpcClient nodeRpcClient;
+    private final GatewayAddressProvider gatewayAddressProvider;
+    private final RestTemplate nodeRpcRestTemplate;
 
     @Override
     public void credit(String userId, String currency, String accountType,
@@ -58,7 +60,10 @@ public class LedgerFacadeImpl implements LedgerFacade {
 
     @SuppressWarnings("unchecked")
     private Map callLedger(Map<String, Object> cmd) {
-        return nodeRpcClient.post(DiscoveryNodeType.ACCOUNT_ENGINE, "/api/admin/ledger/apply", cmd, Map.class);
+        String url = gatewayAddressProvider.getGatewayUrl() + "/api/admin/ledger/apply";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        return nodeRpcRestTemplate.exchange(url, HttpMethod.POST, new HttpEntity<>(cmd, headers), Map.class).getBody();
     }
 
     private Map<String, Object> buildCmd(String type, String userId, String currency, String accountType,

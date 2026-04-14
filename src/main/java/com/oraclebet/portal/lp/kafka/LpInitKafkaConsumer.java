@@ -5,12 +5,8 @@ import com.oraclebet.common.config.kafka.KafkaProperties;
 import com.oraclebet.common.config.kafka.TradingKafkaConsumerThread;
 import com.oraclebet.common.config.kafka.TradingKafkaRecordDecoder;
 import com.oraclebet.common.config.kafka.TradingKafkaTopics;
-import com.oraclebet.discovery.model.DiscoveryNodeType;
-import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
+import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
 import com.oraclebet.portal.lp.dto.LpInitCommand;
-import com.oraclebet.portal.lp.dto.LpInitRequest;
-import com.oraclebet.portal.lp.entity.LpInitStateEntity;
-import com.oraclebet.portal.lp.service.LpInitService;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.slf4j.Logger;
@@ -19,19 +15,20 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
-import java.util.LinkedHashMap;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Kafka Consumer：异步处理 LP 初始化。
  * <p>
- * 每条消息对应一个 market，处理流程：
- * 1. 创建 bot 用户（幂等）
- * 2. 调 lpInitService.initLp()（CREDIT → RESERVE → COMMIT → initInventory → DONE）
- * 3. 写 bot_product_binding（MongoDB）
+ * 每条消息对应一个 market（home + away 两个 selection），处理流程：
+ * 1. 调网关转发到 AccountEngine init-lp-v2：创建用户 → 持仓初始化 → Redis 同步
+ * 2. 写 bot_product_binding（MongoDB）
  * <p>
  * 失败自动进 DLQ。
  */
@@ -40,20 +37,20 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     private static final Logger log = LoggerFactory.getLogger(LpInitKafkaConsumer.class);
     private static final String BOT_BINDING_COLLECTION = "bot_product_binding";
 
-    private final NodeRpcClient nodeRpcClient;
-    private final LpInitService lpInitService;
+    private final GatewayAddressProvider gatewayAddressProvider;
+    private final RestTemplate restTemplate;
     private final MongoTemplate mongoTemplate;
 
     public LpInitKafkaConsumer(KafkaConsumer<String, byte[]> consumer,
                                KafkaProperties properties,
                                TradingKafkaTopics topics,
                                TradingKafkaRecordDecoder<LpInitCommand> decoder,
-                               NodeRpcClient nodeRpcClient,
-                               LpInitService lpInitService,
+                               GatewayAddressProvider gatewayAddressProvider,
+                               RestTemplate restTemplate,
                                MongoTemplate mongoTemplate) {
         super(consumer, log, properties, topics, decoder);
-        this.nodeRpcClient = nodeRpcClient;
-        this.lpInitService = lpInitService;
+        this.gatewayAddressProvider = gatewayAddressProvider;
+        this.restTemplate = restTemplate;
         this.mongoTemplate = mongoTemplate;
     }
 
@@ -64,86 +61,43 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     protected void handleDecodedRecord(ConsumerRecord<String, byte[]> rawRecord, LpInitCommand cmd) throws Exception {
         log.info("[lp-init-consumer] processing eventId={} marketId={}", cmd.getEventId(), cmd.getMarketId());
 
-        // 1. 创建 bot 用户（home 和 away 共用同一个 bot 用户，取 home 的 email 对应的用户）
-        String lpUserId = ensureBotUser(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId());
-        if (lpUserId == null || lpUserId.isBlank()) {
-            throw new RuntimeException("Failed to create/find bot user for eventId=" + cmd.getEventId()
-                    + " marketId=" + cmd.getMarketId());
-        }
+        // 1. Home: 创建用户 + 持仓初始化 + Redis 同步（AccountEngine 内部完成）
+        Map<String, String> homeResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
+                cmd.getHomeSelectionId(), cmd.getHomeQty(), cmd.getHomePrice());
+        String homeUserId = homeResult.get("userId");
+        log.info("[lp-init-consumer] home done userId={} selectionId={}", homeUserId, cmd.getHomeSelectionId());
 
-        log.info("[lp-init-consumer] bot user ready lpUserId={} eventId={} marketId={}",
-                lpUserId, cmd.getEventId(), cmd.getMarketId());
+        // 2. Away: 创建用户 + 持仓初始化 + Redis 同步
+        Map<String, String> awayResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
+                cmd.getAwaySelectionId(), cmd.getAwayQty(), cmd.getAwayPrice());
+        String awayUserId = awayResult.get("userId");
+        log.info("[lp-init-consumer] away done userId={} selectionId={}", awayUserId, cmd.getAwaySelectionId());
 
-        // 2. 构建 LpInitRequest，调用现有 initLp 逻辑
-        LpInitRequest initReq = new LpInitRequest();
-        initReq.setLpUserId(lpUserId);
-        initReq.setEventId(cmd.getEventId());
-        initReq.setMarketId(cmd.getMarketId());
-        initReq.setHomeSelectionId(cmd.getHomeSelectionId());
-        initReq.setHomePrice(cmd.getHomePrice());
-        initReq.setHomeQty(cmd.getHomeQty());
-        initReq.setAwaySelectionId(cmd.getAwaySelectionId());
-        initReq.setAwayPrice(cmd.getAwayPrice());
-        initReq.setAwayQty(cmd.getAwayQty());
-        initReq.setInitCash(cmd.getInitCash() != null ? cmd.getInitCash() : BigDecimal.ZERO);
+        // 3. 写 bot_product_binding（MongoDB）
+        upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId(), homeUserId);
+        upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId(), awayUserId);
 
-        LpInitStateEntity state = lpInitService.initLp(initReq);
-
-        // 3. 写 bot_product_binding
-        if (state.getStatus() == LpInitStateEntity.Status.DONE) {
-            upsertBotBinding(cmd.getEventId(), cmd.getMarketId(),
-                    cmd.getHomeSelectionId(), lpUserId);
-            upsertBotBinding(cmd.getEventId(), cmd.getMarketId(),
-                    cmd.getAwaySelectionId(), lpUserId);
-        }
-
-        log.info("[lp-init-consumer] done eventId={} marketId={} status={}",
-                cmd.getEventId(), cmd.getMarketId(), state.getStatus());
+        log.info("[lp-init-consumer] done eventId={} marketId={}", cmd.getEventId(), cmd.getMarketId());
     }
 
-    /**
-     * 创建 bot 用户（幂等）：通过 Auth 节点 /api/users 注册，然后查询 userId。
-     */
     @SuppressWarnings("unchecked")
-    private String ensureBotUser(String eventId, String marketId, String selectionId) {
-        String email = botEmail(eventId, marketId, selectionId);
+    private Map<String, String> callInitLpV2(String eventId, String marketId, String selectionId,
+                                              BigDecimal qty, BigDecimal price) {
+        String url = gatewayAddressProvider.getGatewayUrl() + "/api/account/lp/init-lp-v2?"
+                + "eventId=" + enc(eventId)
+                + "&marketId=" + enc(marketId)
+                + "&selectionId=" + enc(selectionId)
+                + "&qty=" + qty.toPlainString()
+                + "&price=" + price.toPlainString();
+        return restTemplate.postForObject(url, null, Map.class);
+    }
 
-        // 1. 先通过 Auth 注册（幂等，已存在会返回已有用户）
-        try {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("email", email);
-            body.put("password", "123456");
-            Map<String, Object> result = nodeRpcClient.post(
-                    DiscoveryNodeType.AUTH_NODE, "/api/users", body, Map.class);
-            log.info("[lp-init-consumer] auth sign-up result email={} result={}", email, result);
-        } catch (Exception e) {
-            log.warn("[lp-init-consumer] auth sign-up failed (may already exist) email={} error={}",
-                    email, e.getMessage());
-        }
-
-        // 2. 查询用户 userId
-        try {
-            Map<String, Object> userInfo = nodeRpcClient.get(
-                    DiscoveryNodeType.AUTH_NODE,
-                    "/api/users/self?email=" + email, Map.class);
-            if (userInfo != null) {
-                Object data = userInfo.getOrDefault("data", userInfo);
-                if (data instanceof Map) {
-                    Object userId = ((Map<String, Object>) data).get("id");
-                    if (userId != null) {
-                        log.info("[lp-init-consumer] bot user ready email={} userId={}", email, userId);
-                        return userId.toString();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.error("[lp-init-consumer] failed to query bot user email={}", email, e);
-        }
-
-        return null;
+    private String enc(String s) {
+        return URLEncoder.encode(s, StandardCharsets.UTF_8);
     }
 
     private void upsertBotBinding(String eventId, String marketId,
@@ -168,14 +122,6 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
         } catch (Exception e) {
             log.warn("[lp-init-consumer] failed to upsert bot_product_binding: {}", e.getMessage());
         }
-    }
-
-    private String botEmail(String eventId, String marketId, String outcomeId) {
-        return safe(eventId) + "_" + safe(marketId) + "_" + safe(outcomeId) + "_bot@xbet.com";
-    }
-
-    private String safe(String s) {
-        return s == null ? "null" : s.trim().replaceAll("[^a-zA-Z0-9._-]", "_");
     }
 
     /**

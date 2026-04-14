@@ -1,7 +1,6 @@
 package com.oraclebet.portal.lp.service;
 
-import com.oraclebet.discovery.model.DiscoveryNodeType;
-import com.oraclebet.discovery.nacos.rpc.NodeRpcClient;
+import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
 import com.oraclebet.portal.lp.dto.LpInitRequest;
 import com.oraclebet.portal.lp.entity.LpInitStateEntity;
 import com.oraclebet.portal.lp.repo.LpInitStateRepository;
@@ -10,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
 import java.net.URLEncoder;
@@ -19,8 +19,8 @@ import java.nio.charset.StandardCharsets;
  * LP 初始化服务。
  *
  * <p>流程：可选注资(CREDIT) → 冻结成本(RESERVE) → 扣成本(COMMIT) → 初始化持仓(PG+Redis) → 标记 DONE
- * <p>通过 LedgerFacade RPC 调 AccountEngine 完成 Ledger 操作。
- * <p>通过 init-inventory RPC 调 AccountEngine 的 LpInventoryService 完成持仓初始化（PG写入+Redis同步）。
+ * <p>通过 LedgerFacade 调网关转发到 AccountEngine 完成 Ledger 操作。
+ * <p>通过网关调 AccountEngine 的 LpInventoryService 完成持仓初始化（PG写入+Redis同步）。
  * <p>幂等：同一 (lpUserId, eventId, marketId) 只执行一次。
  */
 @Service
@@ -32,14 +32,17 @@ public class LpInitService {
 
     private final LedgerFacade ledgerFacade;
     private final LpInitStateRepository lpInitStateRepository;
-    private final NodeRpcClient nodeRpcClient;
+    private final GatewayAddressProvider gatewayAddressProvider;
+    private final RestTemplate restTemplate;
 
     public LpInitService(LedgerFacade ledgerFacade,
                          LpInitStateRepository lpInitStateRepository,
-                         NodeRpcClient nodeRpcClient) {
+                         GatewayAddressProvider gatewayAddressProvider,
+                         RestTemplate nodeRpcRestTemplate) {
         this.ledgerFacade = ledgerFacade;
         this.lpInitStateRepository = lpInitStateRepository;
-        this.nodeRpcClient = nodeRpcClient;
+        this.gatewayAddressProvider = gatewayAddressProvider;
+        this.restTemplate = nodeRpcRestTemplate;
     }
 
     public LpInitStateEntity initLp(LpInitRequest req) {
@@ -107,19 +110,18 @@ public class LpInitService {
     }
 
     /**
-     * 调 AccountEngine /api/account/lp/init-inventory
-     * 使用已验证的 LpInventoryService（PG写入 + Redis同步）
+     * 调网关转发到 AccountEngine /api/account/lp/init-inventory
      */
     public void initInventory(String userId, String eventId, String marketId,
                                String selectionId, BigDecimal price, BigDecimal qty) {
-        String url = "/api/account/lp/init-inventory?"
+        String url = gatewayAddressProvider.getGatewayUrl() + "/api/account/lp/init-inventory?"
                 + "userId=" + enc(userId)
                 + "&eventId=" + enc(eventId)
                 + "&marketId=" + enc(marketId)
                 + "&selectionId=" + enc(selectionId)
                 + "&qty=" + qty.toPlainString()
                 + "&price=" + price.toPlainString();
-        nodeRpcClient.post(DiscoveryNodeType.ACCOUNT_ENGINE, url, null, Object.class);
+        restTemplate.postForObject(url, null, Object.class);
     }
 
     private String enc(String s) {
