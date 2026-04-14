@@ -28,10 +28,13 @@ public class OrderAnomalyLogEntity {
     private OffsetDateTime createdAt = OffsetDateTime.now();
 
     @Column(name = "order_id", nullable = false)
-    private UUID orderId;
+    private String orderId;
 
     @Column(name = "reservation_id")
-    private UUID reservationId;
+    private String reservationId;
+
+    public void setOrderId(UUID uuid) { this.orderId = uuid != null ? uuid.toString() : null; }
+    public void setReservationId(UUID uuid) { this.reservationId = uuid != null ? uuid.toString() : null; }
 
     @Column(name = "product_id")
     private String productId;
