@@ -176,6 +176,19 @@ public class AccountEngineRpcAdapters {
                         + "&marketId=" + marketId + "&selectionId=" + selectionId;
                 nodeRpcRestTemplate.postForObject(url, null, Void.class);
             }
+
+            @Override
+            public java.math.BigDecimal queryNetLongPosition(String userId, String eventId, String marketId, String selectionId) {
+                String url = gw.getGatewayUrl() + "/api/account/lp/position?userId=" + userId + "&eventId=" + eventId
+                        + "&marketId=" + marketId + "&selectionId=" + selectionId;
+                Map result = nodeRpcRestTemplate.getForObject(url, Map.class);
+                if (result == null) return java.math.BigDecimal.ZERO;
+                Object netLong = result.get("netLong");
+                if (netLong == null) return java.math.BigDecimal.ZERO;
+                if (netLong instanceof java.math.BigDecimal bd) return bd;
+                if (netLong instanceof Number n) return new java.math.BigDecimal(n.toString());
+                return new java.math.BigDecimal(netLong.toString());
+            }
         };
     }
 
