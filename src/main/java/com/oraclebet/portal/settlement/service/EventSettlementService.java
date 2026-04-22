@@ -232,8 +232,8 @@ public class EventSettlementService {
         // 6) 打印：LP 结算前真实账户
         // =========================
         AccountEngineLedgerAccountStateDto lpBefore = settlementDataApi.findLedgerAccount(lpUserId, currency, accountType);
-        BigDecimal lpBeforeBal = nvl(lpBefore.getBalance()).setScale(SCALE, RoundingMode.DOWN);
-        BigDecimal lpBeforeHeld = nvl(lpBefore.getHeld()).setScale(SCALE, RoundingMode.DOWN);
+        BigDecimal lpBeforeBal = nvl(lpBefore.getAvailable()).setScale(SCALE, RoundingMode.DOWN);
+        BigDecimal lpBeforeHeld = nvl(lpBefore.getFrozen()).setScale(SCALE, RoundingMode.DOWN);
         BigDecimal lpBeforeAvail = lpBeforeBal.subtract(lpBeforeHeld).setScale(SCALE, RoundingMode.DOWN);
 
         log.info("【结算-LP】LP账户={} 结算前(真实) balance={} held={} avail={}",
@@ -322,8 +322,8 @@ public class EventSettlementService {
 
             // 7.4 打印用户真实账户（入账后）
             AccountEngineLedgerAccountStateDto userAfter = settlementDataApi.findLedgerAccount(userId, currency, accountType);
-            BigDecimal ub = nvl(userAfter.getBalance()).setScale(SCALE, RoundingMode.DOWN);
-            BigDecimal uh = nvl(userAfter.getHeld()).setScale(SCALE, RoundingMode.DOWN);
+            BigDecimal ub = nvl(userAfter.getAvailable()).setScale(SCALE, RoundingMode.DOWN);
+            BigDecimal uh = nvl(userAfter.getFrozen()).setScale(SCALE, RoundingMode.DOWN);
             BigDecimal ua = ub.subtract(uh).setScale(SCALE, RoundingMode.DOWN);
 
             log.info("【结算-模型1】lotId={} 用户={} 入账后(真实) balance={} held={} avail={}",
@@ -332,8 +332,8 @@ public class EventSettlementService {
 
         // 7.5 打印 LP 结算后真实账户
         AccountEngineLedgerAccountStateDto lpAfter = settlementDataApi.findLedgerAccount(lpUserId, currency, accountType);
-        BigDecimal lpAfterBal = nvl(lpAfter.getBalance()).setScale(SCALE, RoundingMode.DOWN);
-        BigDecimal lpAfterHeld = nvl(lpAfter.getHeld()).setScale(SCALE, RoundingMode.DOWN);
+        BigDecimal lpAfterBal = nvl(lpAfter.getAvailable()).setScale(SCALE, RoundingMode.DOWN);
+        BigDecimal lpAfterHeld = nvl(lpAfter.getFrozen()).setScale(SCALE, RoundingMode.DOWN);
         BigDecimal lpAfterAvail = lpAfterBal.subtract(lpAfterHeld).setScale(SCALE, RoundingMode.DOWN);
 
         log.info("【结算-LP】LP账户={} 结算后(真实) balance={} held={} avail={}",
