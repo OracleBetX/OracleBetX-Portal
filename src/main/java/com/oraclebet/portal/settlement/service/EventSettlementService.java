@@ -297,6 +297,8 @@ public class EventSettlementService {
             ledgerFacade.commit(
                     lpUserId,
                     reservationId,
+                    currency,
+                    accountType,
                     amount,
                     lpCommitIdemKey,
                     reason

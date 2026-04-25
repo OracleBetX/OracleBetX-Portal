@@ -23,7 +23,12 @@ public interface LedgerFacade {
     String reserve(String userId, String currency, String accountType,
                    BigDecimal amount, String idemKey, String reason);
 
-    /** 提交冻结（扣 balance、减 held，reservation->COMMITTED） */
-    void commit(String userId,String reservationId, BigDecimal amount, String idemKey, String reason);
+    /**
+     * 提交冻结（扣 balance、减 held，reservation->COMMITTED）。
+     * 必须传与 reserve 相同的 currency/accountType，否则会在错误账户上 commit。
+     */
+    void commit(String userId, String reservationId,
+                String currency, String accountType,
+                BigDecimal amount, String idemKey, String reason);
 
 }

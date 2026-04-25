@@ -48,14 +48,17 @@ public class LedgerFacadeImpl implements LedgerFacade {
     }
 
     @Override
-    public void commit(String userId, String reservationId, BigDecimal amount, String idemKey, String reason) {
-        Map<String, Object> cmd = buildCmd("COMMIT", userId, "USDT", "CASH", amount, idemKey, reservationId, reason,
+    public void commit(String userId, String reservationId,
+                       String currency, String accountType,
+                       BigDecimal amount, String idemKey, String reason) {
+        Map<String, Object> cmd = buildCmd("COMMIT", userId, currency, accountType, amount, idemKey, reservationId, reason,
                 Map.of("reservationId", reservationId));
         Map result = callLedger(cmd);
         if (!Boolean.TRUE.equals(result.get("success"))) {
             throw new IllegalStateException("commit failed: " + result.get("code") + " " + result.get("message"));
         }
-        log.info("LEDGER_COMMIT rsvId={} amount={} idemKey={} success=true", reservationId, amount, idemKey);
+        log.info("LEDGER_COMMIT rsvId={} {} {} amount={} idemKey={} success=true",
+                reservationId, currency, accountType, amount, idemKey);
     }
 
     @SuppressWarnings("unchecked")

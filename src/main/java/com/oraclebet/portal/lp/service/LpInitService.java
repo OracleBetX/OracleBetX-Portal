@@ -84,7 +84,7 @@ public class LpInitService {
 
             // 4) 扣成本(COMMIT)
             String commitIdemKey = "LEDGER:COMMIT:" + costRefId;
-            ledgerFacade.commit(lpUserId, reservationId, totalCost, commitIdemKey, "lp init commit cost");
+            ledgerFacade.commit(lpUserId, reservationId, CURRENCY, ACCOUNT_TYPE, totalCost, commitIdemKey, "lp init commit cost");
             log.info("LP_INIT_COMMIT lpUserId={} totalCost={}", lpUserId, totalCost);
 
             // 5) 初始化持仓（PG + Redis，调 AccountEngine LpInventoryService）
