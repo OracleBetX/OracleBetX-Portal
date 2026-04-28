@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oraclebet.common.config.kafka.KafkaProperties;
 import com.oraclebet.common.config.kafka.TradingKafkaTopics;
 import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
+import com.oraclebet.portal.lp.repo.LpInitStateRepository;
 import jakarta.annotation.PreDestroy;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -38,7 +39,8 @@ public class LpInitKafkaConfig {
                              ObjectMapper objectMapper,
                              GatewayAddressProvider gatewayAddressProvider,
                              RestTemplate nodeRpcRestTemplate,
-                             MongoTemplate mongoTemplate) {
+                             MongoTemplate mongoTemplate,
+                             LpInitStateRepository lpInitStateRepository) {
         try {
             KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(
                     buildConsumerProperties(kafkaProperties));
@@ -48,7 +50,8 @@ public class LpInitKafkaConfig {
 
             this.consumerThread = new LpInitKafkaConsumer(
                     consumer, kafkaProperties, topics, decoder,
-                    gatewayAddressProvider, nodeRpcRestTemplate, mongoTemplate);
+                    gatewayAddressProvider, nodeRpcRestTemplate, mongoTemplate,
+                    lpInitStateRepository);
             this.consumerThread.setName("lp-init-consumer");
             this.consumerThread.setDaemon(true);
             this.consumerThread.start();

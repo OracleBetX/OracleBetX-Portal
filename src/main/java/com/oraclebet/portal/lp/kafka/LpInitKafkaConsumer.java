@@ -7,6 +7,8 @@ import com.oraclebet.common.config.kafka.TradingKafkaRecordDecoder;
 import com.oraclebet.common.config.kafka.TradingKafkaTopics;
 import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
 import com.oraclebet.portal.lp.dto.LpInitCommand;
+import com.oraclebet.portal.lp.entity.LpInitStateEntity;
+import com.oraclebet.portal.lp.repo.LpInitStateRepository;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.slf4j.Logger;
@@ -20,6 +22,7 @@ import org.springframework.web.client.RestTemplate;
 import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -40,6 +43,7 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     private final GatewayAddressProvider gatewayAddressProvider;
     private final RestTemplate restTemplate;
     private final MongoTemplate mongoTemplate;
+    private final LpInitStateRepository lpInitStateRepository;
 
     public LpInitKafkaConsumer(KafkaConsumer<String, byte[]> consumer,
                                KafkaProperties properties,
@@ -47,11 +51,13 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
                                TradingKafkaRecordDecoder<LpInitCommand> decoder,
                                GatewayAddressProvider gatewayAddressProvider,
                                RestTemplate restTemplate,
-                               MongoTemplate mongoTemplate) {
+                               MongoTemplate mongoTemplate,
+                               LpInitStateRepository lpInitStateRepository) {
         super(consumer, log, properties, topics, decoder);
         this.gatewayAddressProvider = gatewayAddressProvider;
         this.restTemplate = restTemplate;
         this.mongoTemplate = mongoTemplate;
+        this.lpInitStateRepository = lpInitStateRepository;
     }
 
     @Override
@@ -65,23 +71,101 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     protected void handleDecodedRecord(ConsumerRecord<String, byte[]> rawRecord, LpInitCommand cmd) throws Exception {
         log.info("[lp-init-consumer] processing eventId={} marketId={}", cmd.getEventId(), cmd.getMarketId());
 
-        // 1. Home: 创建用户 + 持仓初始化 + Redis 同步（AccountEngine 内部完成）
-        Map<String, String> homeResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
-                cmd.getHomeSelectionId(), cmd.getHomeQty(), cmd.getHomePrice());
-        String homeUserId = homeResult.get("userId");
-        log.info("[lp-init-consumer] home done userId={} selectionId={}", homeUserId, cmd.getHomeSelectionId());
+        String homeUserId = null;
+        String awayUserId = null;
+        try {
+            // 1. Home: 创建用户 + 持仓初始化 + Redis 同步（AccountEngine 内部完成）
+            Map<String, String> homeResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
+                    cmd.getHomeSelectionId(), cmd.getHomeQty(), cmd.getHomePrice());
+            homeUserId = homeResult.get("userId");
+            log.info("[lp-init-consumer] home done userId={} selectionId={}", homeUserId, cmd.getHomeSelectionId());
 
-        // 2. Away: 创建用户 + 持仓初始化 + Redis 同步
-        Map<String, String> awayResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
-                cmd.getAwaySelectionId(), cmd.getAwayQty(), cmd.getAwayPrice());
-        String awayUserId = awayResult.get("userId");
-        log.info("[lp-init-consumer] away done userId={} selectionId={}", awayUserId, cmd.getAwaySelectionId());
+            // 2. Away: 创建用户 + 持仓初始化 + Redis 同步
+            Map<String, String> awayResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
+                    cmd.getAwaySelectionId(), cmd.getAwayQty(), cmd.getAwayPrice());
+            awayUserId = awayResult.get("userId");
+            log.info("[lp-init-consumer] away done userId={} selectionId={}", awayUserId, cmd.getAwaySelectionId());
 
-        // 3. 写 bot_product_binding（MongoDB）
-        upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId(), homeUserId);
-        upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId(), awayUserId);
+            // 3. 写 bot_product_binding（MongoDB）
+            upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId(), homeUserId);
+            upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId(), awayUserId);
 
-        log.info("[lp-init-consumer] done eventId={} marketId={}", cmd.getEventId(), cmd.getMarketId());
+            // 4. 写 lp_init_state (PostgreSQL exchange schema)，让 GET /api/lp/init-status 看得到进度
+            //    Producer 已经预写两条 INITING 占位（pending-{traceId}-{marketId}-{h|a}），
+            //    consumer 完成后把占位删掉，再写两条真实 lpUserId 的 DONE 记录。
+            deletePendingState(cmd, "h");
+            deletePendingState(cmd, "a");
+            upsertInitState(homeUserId, cmd, LpInitStateEntity.Status.DONE, "OK");
+            upsertInitState(awayUserId, cmd, LpInitStateEntity.Status.DONE, "OK");
+
+            log.info("[lp-init-consumer] done eventId={} marketId={}", cmd.getEventId(), cmd.getMarketId());
+        } catch (Exception e) {
+            // 失败时把两条 pending 占位标记为 FAILED（保留可见进度）
+            try {
+                markPendingFailed(cmd, "h", e.getMessage());
+                markPendingFailed(cmd, "a", e.getMessage());
+            } catch (Exception ignore) {
+                // best-effort
+            }
+            throw e;
+        }
+    }
+
+    private void deletePendingState(LpInitCommand cmd, String slot) {
+        if (cmd.getTraceId() == null) return;
+        try {
+            String pendingId = "pending-" + cmd.getTraceId() + "-" + cmd.getMarketId() + "-" + slot;
+            lpInitStateRepository
+                    .findByLpUserIdAndEventIdAndMarketId(pendingId, cmd.getEventId(), cmd.getMarketId())
+                    .ifPresent(lpInitStateRepository::delete);
+        } catch (Exception e) {
+            log.debug("[lp-init-consumer] delete pending failed slot={} marketId={}: {}",
+                    slot, cmd.getMarketId(), e.getMessage());
+        }
+    }
+
+    private void markPendingFailed(LpInitCommand cmd, String slot, String message) {
+        if (cmd.getTraceId() == null) return;
+        try {
+            String pendingId = "pending-" + cmd.getTraceId() + "-" + cmd.getMarketId() + "-" + slot;
+            lpInitStateRepository
+                    .findByLpUserIdAndEventIdAndMarketId(pendingId, cmd.getEventId(), cmd.getMarketId())
+                    .ifPresent(entity -> {
+                        entity.setStatus(LpInitStateEntity.Status.FAILED);
+                        entity.setMessage(message != null ? message : "consumer failed");
+                        entity.setUpdatedAt(Instant.now());
+                        lpInitStateRepository.save(entity);
+                    });
+        } catch (Exception e) {
+            log.debug("[lp-init-consumer] mark pending FAILED slot={} marketId={}: {}",
+                    slot, cmd.getMarketId(), e.getMessage());
+        }
+    }
+
+    private void upsertInitState(String lpUserId, LpInitCommand cmd,
+                                  LpInitStateEntity.Status status, String message) {
+        if (lpUserId == null || lpUserId.isBlank()) return;
+        try {
+            LpInitStateEntity entity = lpInitStateRepository
+                    .findByLpUserIdAndEventIdAndMarketId(lpUserId, cmd.getEventId(), cmd.getMarketId())
+                    .orElseGet(() -> {
+                        LpInitStateEntity e = new LpInitStateEntity();
+                        e.setLpUserId(lpUserId);
+                        e.setEventId(cmd.getEventId());
+                        e.setMarketId(cmd.getMarketId());
+                        e.setCostRefId(cmd.getTraceId() != null ? cmd.getTraceId() : "v2");
+                        e.setTotalCost(BigDecimal.ZERO);
+                        e.setCreatedAt(Instant.now());
+                        return e;
+                    });
+            entity.setStatus(status);
+            entity.setMessage(message);
+            entity.setUpdatedAt(Instant.now());
+            lpInitStateRepository.save(entity);
+        } catch (Exception e) {
+            log.warn("[lp-init-consumer] upsert lp_init_state failed userId={} eventId={} marketId={}: {}",
+                    lpUserId, cmd.getEventId(), cmd.getMarketId(), e.getMessage());
+        }
     }
 
     @SuppressWarnings("unchecked")

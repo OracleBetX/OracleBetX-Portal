@@ -194,6 +194,12 @@ public class LpInitController {
             LpBatchInitRequest.OutcomeInit home = outcomes.get(0);
             LpBatchInitRequest.OutcomeInit away = outcomes.get(1);
 
+            // 进度可视化：发 Kafka 之前先为 home/away 各写一条 INITING 记录，
+            // consumer 完成后会把这两条 pending 占位转为真实 lpUserId+DONE。
+            // lpUserId 用 "pending-{traceId}-{marketId}-{h|a}" 占位以满足唯一约束。
+            insertPendingState(eventId, market.getMarketId(), traceId, "h", home);
+            insertPendingState(eventId, market.getMarketId(), traceId, "a", away);
+
             LpInitCommand cmd = new LpInitCommand();
             cmd.setEventId(eventId);
             cmd.setMarketId(market.getMarketId());
@@ -218,8 +224,39 @@ public class LpInitController {
         resp.put("status", "PROCESSING");
         resp.put("eventId", eventId);
         resp.put("totalMarkets", sent);
+        resp.put("totalOutcomes", sent * 2);
         resp.put("traceId", traceId);
         return ResponseEntity.ok(resp);
+    }
+
+    private void insertPendingState(String eventId, String marketId, String traceId,
+                                     String slot, LpBatchInitRequest.OutcomeInit outcome) {
+        try {
+            String pendingId = "pending-" + traceId + "-" + marketId + "-" + slot;
+            // 唯一约束 (lpUserId, eventId, marketId)：占位 lpUserId 全局唯一
+            LpInitStateEntity e = lpInitStateRepository
+                    .findByLpUserIdAndEventIdAndMarketId(pendingId, eventId, marketId)
+                    .orElseGet(LpInitStateEntity::new);
+            e.setLpUserId(pendingId);
+            e.setEventId(eventId);
+            e.setMarketId(marketId);
+            e.setStatus(LpInitStateEntity.Status.INITING);
+            e.setCostRefId(traceId);
+            if (outcome.getQty() != null && outcome.getPrice() != null) {
+                e.setTotalCost(outcome.getQty().multiply(outcome.getPrice()));
+            } else {
+                e.setTotalCost(BigDecimal.ZERO);
+            }
+            e.setMessage("queued, waiting for consumer; slot=" + slot
+                    + " selectionId=" + outcome.getSelectionId());
+            Instant now = Instant.now();
+            if (e.getCreatedAt() == null) e.setCreatedAt(now);
+            e.setUpdatedAt(now);
+            lpInitStateRepository.save(e);
+        } catch (Exception ex) {
+            log.warn("[lp-initV2] insert pending state failed marketId={} slot={}: {}",
+                    marketId, slot, ex.getMessage());
+        }
     }
 
     /**
