@@ -44,6 +44,7 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     private final RestTemplate restTemplate;
     private final MongoTemplate mongoTemplate;
     private final LpInitStateRepository lpInitStateRepository;
+    private final String lpbotBaseUrl;
 
     public LpInitKafkaConsumer(KafkaConsumer<String, byte[]> consumer,
                                KafkaProperties properties,
@@ -52,12 +53,16 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
                                GatewayAddressProvider gatewayAddressProvider,
                                RestTemplate restTemplate,
                                MongoTemplate mongoTemplate,
-                               LpInitStateRepository lpInitStateRepository) {
+                               LpInitStateRepository lpInitStateRepository,
+                               String lpbotBaseUrl) {
         super(consumer, log, properties, topics, decoder);
         this.gatewayAddressProvider = gatewayAddressProvider;
         this.restTemplate = restTemplate;
         this.mongoTemplate = mongoTemplate;
         this.lpInitStateRepository = lpInitStateRepository;
+        this.lpbotBaseUrl = (lpbotBaseUrl == null || lpbotBaseUrl.isBlank())
+                ? "http://localhost:10020"
+                : lpbotBaseUrl.replaceAll("/+$", "");
     }
 
     @Override
@@ -86,9 +91,15 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
             awayUserId = awayResult.get("userId");
             log.info("[lp-init-consumer] away done userId={} selectionId={}", awayUserId, cmd.getAwaySelectionId());
 
-            // 3. 写 bot_product_binding（MongoDB）
+            // 3. 写 bot_product_binding（portal 自己一份，与 lpbot 端解耦）
             upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId(), homeUserId);
             upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId(), awayUserId);
+
+            // 3b. 通知 lpbot 自己的 BotUserService 注册并登录两个 selection 对应的 bot
+            //     这样 lpbot 才会写自己的 BotProductBindingRepository（带 _class），
+            //     /admin/bots?fixtureId=xxx 才能列出这些 bot；否则 portal 写的记录 lpbot 不读。
+            notifyLpBotLogin(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId());
+            notifyLpBotLogin(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId());
 
             // 4. 写 lp_init_state (PostgreSQL exchange schema)，让 GET /api/lp/init-status 看得到进度
             //    Producer 已经预写两条 INITING 占位（pending-{traceId}-{marketId}-{h|a}），
@@ -182,6 +193,30 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
 
     private String enc(String s) {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 通知 lpbot 创建机器人用户 + 登录 + 缓存 token，lpbot 内部会写自己的
+     * BotProductBinding 集合（带 spring-data _class），让 lpbot 自己的
+     * /admin/bots?fixtureId=xxx 能 list 到这条 bot。
+     *
+     * <p>失败只 warn 不抛——portal 已经把 LP 资金/持仓初始化完成（callInitLpV2），
+     * 下游 lpbot 注册即使失败也不该回滚整条消息。
+     */
+    private void notifyLpBotLogin(String eventId, String marketId, String selectionId) {
+        if (selectionId == null || selectionId.isBlank()) return;
+        try {
+            String url = lpbotBaseUrl + "/admin/bots/login?"
+                    + "eventId=" + enc(eventId)
+                    + "&marketId=" + enc(marketId)
+                    + "&selectionId=" + enc(selectionId);
+            restTemplate.postForObject(url, null, Map.class);
+            log.debug("[lp-init-consumer] lpbot login OK eventId={} marketId={} selectionId={}",
+                    eventId, marketId, selectionId);
+        } catch (Exception e) {
+            log.warn("[lp-init-consumer] lpbot login FAIL eventId={} marketId={} selectionId={}: {}",
+                    eventId, marketId, selectionId, e.getMessage());
+        }
     }
 
     private void upsertBotBinding(String eventId, String marketId,
