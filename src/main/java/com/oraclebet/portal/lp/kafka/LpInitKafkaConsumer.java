@@ -25,6 +25,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Kafka Consumer：异步处理 LP 初始化。
@@ -45,6 +50,8 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     private final MongoTemplate mongoTemplate;
     private final LpInitStateRepository lpInitStateRepository;
     private final String lpbotBaseUrl;
+    /** 并行 IO 线程池：用于 home/away 两端 callInitLpV2 + lpbot login 同时进行，缩一半处理时间。 */
+    private final ExecutorService ioExecutor;
 
     public LpInitKafkaConsumer(KafkaConsumer<String, byte[]> consumer,
                                KafkaProperties properties,
@@ -63,6 +70,14 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
         this.lpbotBaseUrl = (lpbotBaseUrl == null || lpbotBaseUrl.isBlank())
                 ? "http://localhost:10020"
                 : lpbotBaseUrl.replaceAll("/+$", "");
+        this.ioExecutor = Executors.newFixedThreadPool(8, new ThreadFactory() {
+            private final AtomicInteger n = new AtomicInteger(0);
+            @Override public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "lp-init-io-" + n.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            }
+        });
     }
 
     @Override
@@ -79,27 +94,31 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
         String homeUserId = null;
         String awayUserId = null;
         try {
-            // 1. Home: 创建用户 + 持仓初始化 + Redis 同步（AccountEngine 内部完成）
-            Map<String, String> homeResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
-                    cmd.getHomeSelectionId(), cmd.getHomeQty(), cmd.getHomePrice());
+            // 1+2. Home/Away 并行调 AE init-lp-v2（每条 ~2-5s, 串行 4-10s, 并行 ~2-5s）
+            CompletableFuture<Map<String, String>> homeFut = CompletableFuture.supplyAsync(() ->
+                    callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
+                            cmd.getHomeSelectionId(), cmd.getHomeQty(), cmd.getHomePrice()), ioExecutor);
+            CompletableFuture<Map<String, String>> awayFut = CompletableFuture.supplyAsync(() ->
+                    callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
+                            cmd.getAwaySelectionId(), cmd.getAwayQty(), cmd.getAwayPrice()), ioExecutor);
+            Map<String, String> homeResult = homeFut.join();
+            Map<String, String> awayResult = awayFut.join();
             homeUserId = homeResult.get("userId");
-            log.info("[lp-init-consumer] home done userId={} selectionId={}", homeUserId, cmd.getHomeSelectionId());
-
-            // 2. Away: 创建用户 + 持仓初始化 + Redis 同步
-            Map<String, String> awayResult = callInitLpV2(cmd.getEventId(), cmd.getMarketId(),
-                    cmd.getAwaySelectionId(), cmd.getAwayQty(), cmd.getAwayPrice());
             awayUserId = awayResult.get("userId");
+            log.info("[lp-init-consumer] home done userId={} selectionId={}", homeUserId, cmd.getHomeSelectionId());
             log.info("[lp-init-consumer] away done userId={} selectionId={}", awayUserId, cmd.getAwaySelectionId());
 
             // 3. 写 bot_product_binding（portal 自己一份，与 lpbot 端解耦）
             upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId(), homeUserId);
             upsertBotBinding(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId(), awayUserId);
 
-            // 3b. 通知 lpbot 自己的 BotUserService 注册并登录两个 selection 对应的 bot
-            //     这样 lpbot 才会写自己的 BotProductBindingRepository（带 _class），
-            //     /admin/bots?fixtureId=xxx 才能列出这些 bot；否则 portal 写的记录 lpbot 不读。
-            notifyLpBotLogin(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId());
-            notifyLpBotLogin(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId());
+            // 3b. 通知 lpbot 同步注册两个 selection 对应的 bot — 同样并行
+            CompletableFuture<Void> homeNotify = CompletableFuture.runAsync(() ->
+                    notifyLpBotLogin(cmd.getEventId(), cmd.getMarketId(), cmd.getHomeSelectionId()), ioExecutor);
+            CompletableFuture<Void> awayNotify = CompletableFuture.runAsync(() ->
+                    notifyLpBotLogin(cmd.getEventId(), cmd.getMarketId(), cmd.getAwaySelectionId()), ioExecutor);
+            homeNotify.join();
+            awayNotify.join();
 
             // 4. 写 lp_init_state (PostgreSQL exchange schema)，让 GET /api/lp/init-status 看得到进度
             //    Producer 已经预写两条 INITING 占位（pending-{traceId}-{marketId}-{h|a}），
