@@ -46,6 +46,13 @@ public class LpInitKafkaProducer {
         }
     }
 
+    /** 显式 flush — controller 在批量 send 完后调一次，确保返回前所有消息已经投递到 Kafka broker。 */
+    public void flush() {
+        if (producer != null) {
+            producer.flush();
+        }
+    }
+
     public void send(LpInitCommand cmd) {
         try {
             byte[] payload = objectMapper.writeValueAsBytes(cmd);
@@ -70,7 +77,8 @@ public class LpInitKafkaProducer {
                             metadata.partition(), metadata.offset());
                 }
             });
-            producer.flush();
+            // 不在每条 send 后 flush — flush 会强制同步等待，让 controller 串行阻塞 ~2s/条。
+            // 改由调用方（initV2 controller）在 batch 末尾统一 flush 一次。
         } catch (Exception e) {
             log.error("[lp-init-producer] serialize/send error eventId={} marketId={}: {}",
                     cmd.getEventId(), cmd.getMarketId(), e.getMessage(), e);

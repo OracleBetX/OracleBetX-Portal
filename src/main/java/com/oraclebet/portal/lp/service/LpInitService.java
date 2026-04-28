@@ -51,28 +51,30 @@ public class LpInitService {
         String lpUserId = req.getLpUserId();
         String eventId = req.getEventId();
         String marketId = req.getMarketId();
+        boolean force = req.isForce();
 
         String costRefId = "LPINIT:COST:" + eventId + ":" + marketId;
         BigDecimal totalCost = req.getHomePrice().multiply(req.getHomeQty())
                 .add(req.getAwayPrice().multiply(req.getAwayQty()));
 
-        // 1) 幂等门闩
-        LpInitStateEntity gate = tryAcquireGate(lpUserId, eventId, marketId, costRefId, totalCost);
-        if (gate.getStatus() == LpInitStateEntity.Status.DONE) {
+        // 1) 幂等门闩；force=true 时即使 DONE/FAILED 也重置重做
+        LpInitStateEntity gate = tryAcquireGate(lpUserId, eventId, marketId, costRefId, totalCost, force);
+        if (!force && gate.getStatus() == LpInitStateEntity.Status.DONE) {
             log.info("LP_INIT_ALREADY_DONE lpUserId={} eventId={} marketId={}", lpUserId, eventId, marketId);
             return gate;
         }
 
-        log.info("LP_INIT_START lpUserId={} eventId={} marketId={} totalCost={}", lpUserId, eventId, marketId, totalCost);
+        log.info("LP_INIT_START lpUserId={} eventId={} marketId={} totalCost={} force={}",
+                lpUserId, eventId, marketId, totalCost, force);
 
         try {
-            // 2) 可选注资
+            // 2) 可选注资 — idemKey 用事件+用户级（与 marketId 无关），N 个 market 共用一次注资
             if (req.getInitCash() != null && req.getInitCash().compareTo(BigDecimal.ZERO) > 0) {
-                String cashRefId = "LPINIT:CASH:" + eventId + ":" + marketId;
+                String cashRefId = "LPINIT:CASH:" + eventId + ":" + lpUserId;
                 String cashIdemKey = "LEDGER:CREDIT:" + cashRefId;
                 ledgerFacade.credit(lpUserId, CURRENCY, ACCOUNT_TYPE, req.getInitCash(),
                         cashRefId, cashIdemKey, "lp init cash");
-                log.info("LP_INIT_CREDIT lpUserId={} amount={}", lpUserId, req.getInitCash());
+                log.info("LP_INIT_CREDIT lpUserId={} amount={} cashRefId={}", lpUserId, req.getInitCash(), cashRefId);
             }
 
             // 3) 冻结总成本(RESERVE)
@@ -141,9 +143,19 @@ public class LpInitService {
     }
 
     private LpInitStateEntity tryAcquireGate(String lpUserId, String eventId, String marketId,
-                                             String costRefId, BigDecimal totalCost) {
+                                             String costRefId, BigDecimal totalCost, boolean force) {
         var existing = lpInitStateRepository.findByLpUserIdAndEventIdAndMarketId(lpUserId, eventId, marketId);
-        if (existing.isPresent()) return existing.get();
+        if (existing.isPresent()) {
+            LpInitStateEntity old = existing.get();
+            if (!force) return old;
+            // force=true：复用旧 row（保留 id），状态重置为 INITING，让流程重新跑一遍
+            old.setStatus(LpInitStateEntity.Status.INITING);
+            old.setCostRefId(costRefId);
+            old.setTotalCost(totalCost);
+            old.setReservationId(null);
+            old.setMessage("RESET_BY_FORCE");
+            return lpInitStateRepository.save(old);
+        }
 
         LpInitStateEntity gate = new LpInitStateEntity();
         gate.setLpUserId(lpUserId);

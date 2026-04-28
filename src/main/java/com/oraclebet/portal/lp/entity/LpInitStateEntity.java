@@ -18,7 +18,13 @@ import java.time.Instant;
 @Setter
 public class LpInitStateEntity {
 
-    public enum Status { INITING, DONE, FAILED }
+    public enum Status {
+        INITING,
+        DONE,
+        FAILED,
+        /** GC sweeper 把超过阈值仍 INITING 的孤儿占位行标成 EXPIRED，避免前端 init-status 永远 initing>0。 */
+        EXPIRED
+    }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

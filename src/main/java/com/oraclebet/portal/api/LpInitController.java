@@ -53,9 +53,12 @@ public class LpInitController {
     }
 
     @PostMapping("/init")
-    public ResponseEntity<LpInitResponse> initLp(@RequestBody LpInitRequest request) {
-        log.info("[lp-init] lpUserId={} eventId={} marketId={}",
-                request.getLpUserId(), request.getEventId(), request.getMarketId());
+    public ResponseEntity<LpInitResponse> initLp(@RequestBody LpInitRequest request,
+                                                 @RequestParam(value = "force", required = false) Boolean force) {
+        // query 参数优先于 body，方便前端按钮不改 body 也能触发 force
+        if (Boolean.TRUE.equals(force)) request.setForce(true);
+        log.info("[lp-init] lpUserId={} eventId={} marketId={} force={}",
+                request.getLpUserId(), request.getEventId(), request.getMarketId(), request.isForce());
 
         LpInitStateEntity state = lpInitService.initLp(request);
 
@@ -184,6 +187,11 @@ public class LpInitController {
         boolean cashSent = false;
         int sent = 0;
 
+        // 先一次性把所有 pending 占位累积到 List，循环结束 saveAll 单事务批量 insert，
+        // 避免之前每条 save() 独立事务带来的 ~2s/market 串行 PG flush。
+        List<LpInitStateEntity> pendingRows = new ArrayList<>(items.size() * 2);
+        List<LpInitCommand> commandsToSend = new ArrayList<>(items.size());
+
         for (LpBatchInitRequest.MarketInit market : items) {
             List<LpBatchInitRequest.OutcomeInit> outcomes = market.getOutcomes();
             if (outcomes == null || outcomes.size() != 2) {
@@ -197,8 +205,8 @@ public class LpInitController {
             // 进度可视化：发 Kafka 之前先为 home/away 各写一条 INITING 记录，
             // consumer 完成后会把这两条 pending 占位转为真实 lpUserId+DONE。
             // lpUserId 用 "pending-{traceId}-{marketId}-{h|a}" 占位以满足唯一约束。
-            insertPendingState(eventId, market.getMarketId(), traceId, "h", home);
-            insertPendingState(eventId, market.getMarketId(), traceId, "a", away);
+            pendingRows.add(buildPendingState(eventId, market.getMarketId(), traceId, "h", home));
+            pendingRows.add(buildPendingState(eventId, market.getMarketId(), traceId, "a", away));
 
             LpInitCommand cmd = new LpInitCommand();
             cmd.setEventId(eventId);
@@ -211,10 +219,35 @@ public class LpInitController {
             cmd.setAwayQty(away.getQty());
             cmd.setInitCash(!cashSent ? initCash : BigDecimal.ZERO);
             cmd.setTraceId(traceId);
-
-            lpInitKafkaProducer.send(cmd);
+            commandsToSend.add(cmd);
             cashSent = true;
             sent++;
+        }
+
+        // 批量 insert pending（如果同 traceId 已经有 pending row，靠唯一约束 = (lpUserId, eventId, marketId)
+        // 加上占位 lpUserId 包含 traceId，理论上不会冲突；万一冲突 saveAll 抛异常时降级为逐条 save 兜底）
+        try {
+            lpInitStateRepository.saveAll(pendingRows);
+        } catch (Exception batchEx) {
+            log.warn("[lp-initV2] batch saveAll failed, fallback to row-by-row: {}", batchEx.getMessage());
+            for (LpInitStateEntity row : pendingRows) {
+                try { lpInitStateRepository.save(row); }
+                catch (Exception rowEx) {
+                    log.warn("[lp-initV2] row save failed lpUserId={}: {}", row.getLpUserId(), rowEx.getMessage());
+                }
+            }
+        }
+
+        // 占位 row 落库后异步发 Kafka — producer.send 已是异步（callback 模式），不再阻塞循环
+        for (LpInitCommand cmd : commandsToSend) {
+            lpInitKafkaProducer.send(cmd);
+        }
+
+        // 一次性 flush 所有已 send 的消息（producer.send 内部不再每条 flush，靠这里收尾）
+        try {
+            lpInitKafkaProducer.flush();
+        } catch (Exception flushErr) {
+            log.warn("[lp-initV2] producer flush failed (messages may still be buffered): {}", flushErr.getMessage());
         }
 
         log.info("[lp-initV2] published {} messages, traceId={}", sent, traceId);
@@ -229,34 +262,47 @@ public class LpInitController {
         return ResponseEntity.ok(resp);
     }
 
-    private void insertPendingState(String eventId, String marketId, String traceId,
-                                     String slot, LpBatchInitRequest.OutcomeInit outcome) {
-        try {
-            String pendingId = "pending-" + traceId + "-" + marketId + "-" + slot;
-            // 唯一约束 (lpUserId, eventId, marketId)：占位 lpUserId 全局唯一
-            LpInitStateEntity e = lpInitStateRepository
-                    .findByLpUserIdAndEventIdAndMarketId(pendingId, eventId, marketId)
-                    .orElseGet(LpInitStateEntity::new);
-            e.setLpUserId(pendingId);
-            e.setEventId(eventId);
-            e.setMarketId(marketId);
-            e.setStatus(LpInitStateEntity.Status.INITING);
-            e.setCostRefId(traceId);
-            if (outcome.getQty() != null && outcome.getPrice() != null) {
-                e.setTotalCost(outcome.getQty().multiply(outcome.getPrice()));
-            } else {
-                e.setTotalCost(BigDecimal.ZERO);
-            }
-            e.setMessage("queued, waiting for consumer; slot=" + slot
-                    + " selectionId=" + outcome.getSelectionId());
-            Instant now = Instant.now();
-            if (e.getCreatedAt() == null) e.setCreatedAt(now);
-            e.setUpdatedAt(now);
-            lpInitStateRepository.save(e);
-        } catch (Exception ex) {
-            log.warn("[lp-initV2] insert pending state failed marketId={} slot={}: {}",
-                    marketId, slot, ex.getMessage());
+    /** 构建一条 pending 占位 entity（不存盘，由调用方批量 saveAll）。 */
+    private LpInitStateEntity buildPendingState(String eventId, String marketId, String traceId,
+                                                String slot, LpBatchInitRequest.OutcomeInit outcome) {
+        String pendingId = "pending-" + traceId + "-" + marketId + "-" + slot;
+        LpInitStateEntity e = new LpInitStateEntity();
+        e.setLpUserId(pendingId);
+        e.setEventId(eventId);
+        e.setMarketId(marketId);
+        e.setStatus(LpInitStateEntity.Status.INITING);
+        e.setCostRefId(traceId);
+        if (outcome.getQty() != null && outcome.getPrice() != null) {
+            e.setTotalCost(outcome.getQty().multiply(outcome.getPrice()));
+        } else {
+            e.setTotalCost(BigDecimal.ZERO);
         }
+        e.setMessage("queued, waiting for consumer; slot=" + slot
+                + " selectionId=" + outcome.getSelectionId());
+        Instant now = Instant.now();
+        e.setCreatedAt(now);
+        e.setUpdatedAt(now);
+        return e;
+    }
+
+    /**
+     * POST /api/lp/init/reset?eventId=xxx — 重置 lp_init_state（仅清 portal 自己的进度表，
+     * 不动 AE 的 event_account/event_position_lot 和 ledger，也不动 lpbot 注册）。
+     *
+     * <p>用途：状态机卡死（例如 GC 标 EXPIRED 想清掉、或 FAILED 想重投）时人工触发，
+     * 之后用户可重新提交 /api/lp/initV2 让 consumer 重新走一遍幂等流程。
+     */
+    @PostMapping("/init/reset")
+    public ResponseEntity<Map<String, Object>> resetInitState(@RequestParam String eventId) {
+        List<LpInitStateEntity> rows = lpInitStateRepository.findByEventId(eventId);
+        int n = rows.size();
+        if (n > 0) lpInitStateRepository.deleteAll(rows);
+        log.info("[lp-init-reset] eventId={} cleared {} rows", eventId, n);
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("eventId", eventId);
+        resp.put("clearedRows", n);
+        resp.put("note", "AE event_account / lpbot binding NOT touched; resubmit initV2 to re-run idempotent flow");
+        return ResponseEntity.ok(resp);
     }
 
     /**
@@ -272,6 +318,7 @@ public class LpInitController {
         long done = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.DONE).count();
         long failed = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.FAILED).count();
         long initing = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.INITING).count();
+        long expired = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.EXPIRED).count();
         long createdNew = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.DONE
                 && s.getMessage() != null && s.getMessage().contains("(NEW)")).count();
         long reused = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.DONE
@@ -293,6 +340,7 @@ public class LpInitController {
         resp.put("done", done);
         resp.put("failed", failed);
         resp.put("initing", initing);
+        resp.put("expired", expired);
         resp.put("createdNew", createdNew);
         resp.put("reused", reused);
         resp.put("details", details);

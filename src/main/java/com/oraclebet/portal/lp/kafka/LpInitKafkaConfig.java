@@ -5,6 +5,7 @@ import com.oraclebet.common.config.kafka.KafkaProperties;
 import com.oraclebet.common.config.kafka.TradingKafkaTopics;
 import com.oraclebet.discovery.nacos.rpc.GatewayAddressProvider;
 import com.oraclebet.portal.lp.repo.LpInitStateRepository;
+import com.oraclebet.portal.lp.service.LpInitStateWriter;
 import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Value;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -42,6 +43,7 @@ public class LpInitKafkaConfig {
                              RestTemplate nodeRpcRestTemplate,
                              MongoTemplate mongoTemplate,
                              LpInitStateRepository lpInitStateRepository,
+                             LpInitStateWriter stateWriter,
                              @Value("${lpbot.base-url:http://localhost:10020}") String lpbotBaseUrl) {
         try {
             KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(
@@ -53,7 +55,7 @@ public class LpInitKafkaConfig {
             this.consumerThread = new LpInitKafkaConsumer(
                     consumer, kafkaProperties, topics, decoder,
                     gatewayAddressProvider, nodeRpcRestTemplate, mongoTemplate,
-                    lpInitStateRepository, lpbotBaseUrl);
+                    lpInitStateRepository, stateWriter, lpbotBaseUrl);
             this.consumerThread.setName("lp-init-consumer");
             this.consumerThread.setDaemon(true);
             this.consumerThread.start();
