@@ -84,7 +84,8 @@ public class LpInitKafkaConfig {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "10");
+        // 调高让一次 poll 把整个 initV2 批次（典型 30+ markets）一次性 dispatch 给 ioExecutor 并发处理
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "50");
         props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "300000"); // 5 min
         props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "30000");
 

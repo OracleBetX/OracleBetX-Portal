@@ -23,9 +23,13 @@ import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -50,8 +54,10 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     private final MongoTemplate mongoTemplate;
     private final LpInitStateRepository lpInitStateRepository;
     private final String lpbotBaseUrl;
-    /** 并行 IO 线程池：用于 home/away 两端 callInitLpV2 + lpbot login 同时进行，缩一半处理时间。 */
+    /** 并行 IO 线程池：home/away 两端 callInitLpV2 + lpbot login 并行 + 整批 records 并发处理。 */
     private final ExecutorService ioExecutor;
+    /** 当前 poll 批次缓冲：handleDecodedRecord 入队，afterPollBatch 一次性并发处理。 */
+    private final Queue<LpInitCommand> currentBatch = new ConcurrentLinkedQueue<>();
 
     public LpInitKafkaConsumer(KafkaConsumer<String, byte[]> consumer,
                                KafkaProperties properties,
@@ -86,9 +92,48 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
         log.info("[lp-init-consumer] subscribed to topic={}", topics().lpInit());
     }
 
+    /**
+     * 父类 for-each-record 串行调用本方法。这里不立即处理，先入队，等 afterPollBatch 一次性并发。
+     * 这样一批 max-poll-records=10 的消息能并发处理（每 marketId 一个 future），处理时间从
+     * "10 markets × 串行单条耗时" 缩到 "max(10 个并行 future)"。
+     */
     @Override
+    protected void handleDecodedRecord(ConsumerRecord<String, byte[]> rawRecord, LpInitCommand cmd) {
+        currentBatch.add(cmd);
+    }
+
+    /**
+     * 一批 records 全部入队后由父类调用：用 ioExecutor 并发处理，所有 future 完成才返回。
+     * 任一 record 抛异常都会 propagate 出去，父类整批不 commit offset，下次 poll 重投本批。
+     * 业务侧已经强幂等（AE init-lp-v2 + lpbot login + lp_init_state upsert），重投安全。
+     */
+    @Override
+    protected void afterPollBatch() throws Exception {
+        List<LpInitCommand> batch = new ArrayList<>();
+        LpInitCommand c;
+        while ((c = currentBatch.poll()) != null) batch.add(c);
+        if (batch.isEmpty()) return;
+
+        log.info("[lp-init-consumer] dispatching batch size={} in parallel", batch.size());
+        long t0 = System.currentTimeMillis();
+        List<CompletableFuture<Void>> futures = new ArrayList<>(batch.size());
+        for (LpInitCommand cmd : batch) {
+            futures.add(CompletableFuture.runAsync(() -> processOne(cmd), ioExecutor));
+        }
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            log.info("[lp-init-consumer] batch done size={} elapsed={}ms",
+                    batch.size(), System.currentTimeMillis() - t0);
+        } catch (CompletionException ce) {
+            Throwable cause = ce.getCause() != null ? ce.getCause() : ce;
+            log.error("[lp-init-consumer] batch failed size={} elapsed={}ms cause={}",
+                    batch.size(), System.currentTimeMillis() - t0, cause.getMessage(), cause);
+            throw (cause instanceof Exception) ? (Exception) cause : new Exception(cause);
+        }
+    }
+
     @SuppressWarnings("unchecked")
-    protected void handleDecodedRecord(ConsumerRecord<String, byte[]> rawRecord, LpInitCommand cmd) throws Exception {
+    private void processOne(LpInitCommand cmd) {
         log.info("[lp-init-consumer] processing eventId={} marketId={}", cmd.getEventId(), cmd.getMarketId());
 
         String homeUserId = null;
@@ -139,7 +184,7 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
             } catch (Exception ignore) {
                 // best-effort
             }
-            throw e;
+            throw new RuntimeException(e);
         }
     }
 
