@@ -104,10 +104,12 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
             // 4. 写 lp_init_state (PostgreSQL exchange schema)，让 GET /api/lp/init-status 看得到进度
             //    Producer 已经预写两条 INITING 占位（pending-{traceId}-{marketId}-{h|a}），
             //    consumer 完成后把占位删掉，再写两条真实 lpUserId 的 DONE 记录。
+            //    AE init-lp-v2 是 idempotent，重跑时返回相同 lpUserId → 区分 NEW 与 RE-INIT
+            //    写到 message 字段里，让 GET /init-status 能聚合"本次新建 vs 复用"两个数。
             deletePendingState(cmd, "h");
             deletePendingState(cmd, "a");
-            upsertInitState(homeUserId, cmd, LpInitStateEntity.Status.DONE, "OK");
-            upsertInitState(awayUserId, cmd, LpInitStateEntity.Status.DONE, "OK");
+            upsertInitState(homeUserId, cmd, LpInitStateEntity.Status.DONE, null);
+            upsertInitState(awayUserId, cmd, LpInitStateEntity.Status.DONE, null);
 
             log.info("[lp-init-consumer] done eventId={} marketId={}", cmd.getEventId(), cmd.getMarketId());
         } catch (Exception e) {
@@ -154,23 +156,32 @@ public class LpInitKafkaConsumer extends TradingKafkaConsumerThread<LpInitComman
     }
 
     private void upsertInitState(String lpUserId, LpInitCommand cmd,
-                                  LpInitStateEntity.Status status, String message) {
+                                  LpInitStateEntity.Status status, String fixedMessage) {
         if (lpUserId == null || lpUserId.isBlank()) return;
         try {
-            LpInitStateEntity entity = lpInitStateRepository
-                    .findByLpUserIdAndEventIdAndMarketId(lpUserId, cmd.getEventId(), cmd.getMarketId())
-                    .orElseGet(() -> {
-                        LpInitStateEntity e = new LpInitStateEntity();
-                        e.setLpUserId(lpUserId);
-                        e.setEventId(cmd.getEventId());
-                        e.setMarketId(cmd.getMarketId());
-                        e.setCostRefId(cmd.getTraceId() != null ? cmd.getTraceId() : "v2");
-                        e.setTotalCost(BigDecimal.ZERO);
-                        e.setCreatedAt(Instant.now());
-                        return e;
-                    });
+            java.util.Optional<LpInitStateEntity> existing = lpInitStateRepository
+                    .findByLpUserIdAndEventIdAndMarketId(lpUserId, cmd.getEventId(), cmd.getMarketId());
+            boolean isNew = existing.isEmpty();
+            LpInitStateEntity entity = existing.orElseGet(() -> {
+                LpInitStateEntity e = new LpInitStateEntity();
+                e.setLpUserId(lpUserId);
+                e.setEventId(cmd.getEventId());
+                e.setMarketId(cmd.getMarketId());
+                e.setCostRefId(cmd.getTraceId() != null ? cmd.getTraceId() : "v2");
+                e.setTotalCost(BigDecimal.ZERO);
+                e.setCreatedAt(Instant.now());
+                return e;
+            });
             entity.setStatus(status);
-            entity.setMessage(message);
+            // 当 fixedMessage 显式传入用 fixed；否则 DONE 时按 NEW/RE-INIT 自动打 tag。
+            // 这两个 tag 让 GET /init-status 能聚合"本次新建 vs 复用"两个数。
+            if (fixedMessage != null) {
+                entity.setMessage(fixedMessage);
+            } else if (status == LpInitStateEntity.Status.DONE) {
+                entity.setMessage(isNew ? "OK (NEW)" : "OK (RE-INIT)");
+            } else {
+                entity.setMessage(status.name());
+            }
             entity.setUpdatedAt(Instant.now());
             lpInitStateRepository.save(entity);
         } catch (Exception e) {

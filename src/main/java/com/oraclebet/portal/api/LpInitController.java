@@ -260,7 +260,10 @@ public class LpInitController {
     }
 
     /**
-     * GET /api/lp/init-status?eventId=xxx — 查询 LP 初始化进度
+     * GET /api/lp/init-status?eventId=xxx — 查询 LP 初始化进度。
+     *
+     * <p>聚合返回 done/failed/initing 三态计数 + DONE 内部细分 createdNew vs reused
+     * （本次新建 bot 用户 vs 命中已有 bot 复用，靠 message 字段的 NEW/RE-INIT 标签判定）。
      */
     @GetMapping("/init-status")
     public ResponseEntity<Map<String, Object>> initStatus(@RequestParam String eventId) {
@@ -269,6 +272,10 @@ public class LpInitController {
         long done = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.DONE).count();
         long failed = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.FAILED).count();
         long initing = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.INITING).count();
+        long createdNew = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.DONE
+                && s.getMessage() != null && s.getMessage().contains("(NEW)")).count();
+        long reused = states.stream().filter(s -> s.getStatus() == LpInitStateEntity.Status.DONE
+                && s.getMessage() != null && s.getMessage().contains("(RE-INIT)")).count();
 
         List<Map<String, Object>> details = states.stream().map(s -> {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -286,6 +293,8 @@ public class LpInitController {
         resp.put("done", done);
         resp.put("failed", failed);
         resp.put("initing", initing);
+        resp.put("createdNew", createdNew);
+        resp.put("reused", reused);
         resp.put("details", details);
         return ResponseEntity.ok(resp);
     }
