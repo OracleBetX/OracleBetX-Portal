@@ -46,7 +46,7 @@ public class ProductCatalogApiAdapter implements ProductCatalogApi {
 
     @Override
     public Optional<ProductRootDto> findByLegacyEventId(String eventId) {
-        return findProductRootById(eventId);
+        return Optional.ofNullable(productRootRepository.findByEventId(eventId)).map(this::toDto);
     }
 
     @Override
@@ -55,6 +55,16 @@ public class ProductCatalogApiAdapter implements ProductCatalogApi {
         if (entity != null) {
             entity.setStatus(status);
             productRootRepository.saveAll(List.of(entity));
+        }
+    }
+
+    @Override
+    public void updateMarketStatusByLegacyId(String eventId, String marketId, String status) {
+        MarketEntity entity = marketCatalogRepository.findByLegacyEventIdAndMarketId(eventId, marketId);
+        if (entity != null) {
+            entity.setStatus(status);
+            entity.setTradable(false);
+            marketCatalogRepository.save(entity);
         }
     }
 
